@@ -53,6 +53,7 @@
         function connectWebSocket() {
             // Usa 'wss://' para conexiones seguras (HTTPS)
             ws = new WebSocket(`wss://${BACKEND_HOST}/ws/${AGENT_ID}`);
+    
 
             ws.onopen = () => updateStatus(`Conectado como ${AGENT_ID}`, 'status-connected');
             ws.onclose = () => {

@@ -37,7 +37,7 @@ origins = [
     
     # Para pruebas locales útiles:
     "http://localhost",
-    "http://localhost:8000",
+    "http://localhost:5500",
     "null"
 ]
 app.add_middleware(
@@ -64,6 +64,8 @@ async def send_call_action(call_id: str, action: str, sdp: str = None):
             return None
 
 # --- Endpoint WebSocket para el Frontend ---
+
+
 @app.websocket("/ws/{agent_id}")
 async def websocket_endpoint(websocket: WebSocket, agent_id: str):
     await websocket.accept()
