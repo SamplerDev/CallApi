@@ -33,8 +33,12 @@ app = FastAPI(title="WhatsApp WebRTC Bridge")
 
 # --- Configuración de CORS ---
 origins = [
+    # Ejemplo: "https://mi-softphone.vercel.app",
+    
+    # Para pruebas locales útiles:
     "http://localhost",
-    "http://localhost:8000", # Para pruebas locales
+    "http://localhost:8000",
+    "null"
 ]
 app.add_middleware(
     CORSMiddleware,
