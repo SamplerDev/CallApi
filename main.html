@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WhatsApp WebRTC Agent</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background-color: #f0f2f5; color: #1c1e21; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .phone-container { background-color: white; border-radius: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); padding: 30px; text-align: center; width: 320px; }
+        h1 { font-size: 1.5em; margin-bottom: 20px; }
+        #status { font-size: 1.1em; margin-bottom: 25px; padding: 12px; border-radius: 8px; font-weight: 500; }
+        .status-disconnected { background-color: #f8d7da; color: #721c24; }
+        .status-connected { background-color: #d4edda; color: #155724; }
+        .status-ringing { background-color: #fff3cd; color: #856404; animation: pulse 1.5s infinite; }
+        .status-active { background-color: #cce5ff; color: #004085; }
+        .controls button { font-size: 1.2em; padding: 15px 25px; margin: 10px; cursor: pointer; border-radius: 50px; border: none; color: white; transition: background-color 0.2s; }
+        #acceptBtn { background-color: #28a745; }
+        #rejectBtn, #hangupBtn { background-color: #dc3545; }
+        button:disabled { background-color: #6c757d; cursor: not-allowed; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+    <div class="phone-container">
+        <h1>Agente de Llamadas</h1>
+        <div id="status" class="status-disconnected">Desconectado</div>
+        <div class="controls">
+            <button id="acceptBtn" disabled>Aceptar</button>
+            <button id="rejectBtn" disabled>Rechazar</button>
+            <button id="hangupBtn" style="display:none;">Colgar</button>
+        </div>
+    </div>
+    <!-- Elemento de audio para reproducir el sonido del llamante -->
+    <audio id="remoteAudio" autoplay></audio>
+
+    <script>
+        // --- CONFIGURACIÓN ---
+        // ¡IMPORTANTE! Reemplaza con la URL de tu backend
+        const BACKEND_HOST = "callapi-bwst.onrender.com"; 
+        const AGENT_ID = "agent_001"; // Debe coincidir con la lógica del backend
+
+        // --- ELEMENTOS DEL DOM ---
+        const statusDiv = document.getElementById('status');
+        const acceptBtn = document.getElementById('acceptBtn');
+        const rejectBtn = document.getElementById('rejectBtn');
+        const hangupBtn = document.getElementById('hangupBtn');
+        const remoteAudio = document.getElementById('remoteAudio');
+
+        // --- ESTADO DE LA APLICACIÓN ---
+        let ws;
+        let peerConnection;
+        let currentCallId;
+
+        function connectWebSocket() {
+            // Usa 'wss://' para conexiones seguras (HTTPS)
+            ws = new WebSocket(`wss://${BACKEND_HOST}/ws/${AGENT_ID}`);
+
+            ws.onopen = () => updateStatus(`Conectado como ${AGENT_ID}`, 'status-connected');
+            ws.onclose = () => {
+                updateStatus('Desconectado. Reintentando...', 'status-disconnected');
+                setTimeout(connectWebSocket, 3000); // Reintentar conexión cada 3 segundos
+            };
+            ws.onerror = () => ws.close();
+            ws.onmessage = handleServerMessage;
+        }
+
+        function updateStatus(text, className) {
+            statusDiv.textContent = text;
+            statusDiv.className = className;
+        }
+
+        function setControlsState(state) {
+            acceptBtn.disabled = state !== 'ringing';
+            rejectBtn.disabled = state !== 'ringing';
+            hangupBtn.style.display = state === 'active' ? 'inline-block' : 'none';
+            acceptBtn.style.display = state !== 'active' ? 'inline-block' : 'none';
+            rejectBtn.style.display = state !== 'active' ? 'inline-block' : 'none';
+        }
+
+        async function handleServerMessage(event) {
+            const data = JSON.parse(event.data);
+            console.log("Mensaje del servidor:", data);
+
+            switch (data.type) {
+                case "incoming_call":
+                    currentCallId = data.call_id;
+                    updateStatus(`Llamada entrante de ${data.from}...`, 'status-ringing');
+                    setControlsState('ringing');
+                    break;
+
+                case "answer_from_server":
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }));
+                    updateStatus(`Llamada activa con ${currentCallId}`, 'status-active');
+                    setControlsState('active');
+                    break;
+
+                case "call_terminated":
+                    hangup(false); // No notificar al backend, ya sabe que terminó
+                    break;
+            }
+        }
+
+        async function startCall() {
+            peerConnection = new RTCPeerConnection();
+
+            peerConnection.ontrack = (event) => {
+                console.log("Recibiendo pista de audio remota...");
+                if (remoteAudio.srcObject !== event.streams[0]) {
+                    remoteAudio.srcObject = event.streams[0];
+                }
+            };
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
+            } catch (err) {
+                alert("No se pudo acceder al micrófono. Por favor, concede los permisos.");
+                setControlsState('connected');
+                return;
+            }
+
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+
+            ws.send(JSON.stringify({
+                type: "offer_from_browser",
+                call_id: currentCallId,
+                sdp: peerConnection.localDescription.sdp
+            }));
+        }
+
+        function hangup(notifyBackend = true) {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            if (notifyBackend && currentCallId) {
+                ws.send(JSON.stringify({ type: "hangup_from_browser", call_id: currentCallId }));
+            }
+            updateStatus(`Conectado como ${AGENT_ID}`, 'status-connected');
+            setControlsState('connected');
+            currentCallId = null;
+        }
+
+        // --- EVENT LISTENERS ---
+        acceptBtn.onclick = startCall;
+        hangupBtn.onclick = () => hangup(true);
+        // La lógica de rechazo se puede añadir aquí, enviando un mensaje 'reject_call' al backend
+
+        // Iniciar la conexión
+        connectWebSocket();
+    </script>
+</body>
+</html>
