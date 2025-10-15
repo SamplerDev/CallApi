@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 import uvicorn
+from fastapi.responses import HTMLResponse
 
 # --- Configuración Inicial ---
 load_dotenv()
@@ -45,6 +46,7 @@ origins = [
     # Es buena práctica mantener estas por si usas otros puertos para probar.
     "http://localhost",
     "http://localhost:8000",
+    "https://callapi-bwst.onrender.com/"
     
     # Y esta para pruebas abriendo el archivo directamente.
     "null"
@@ -268,10 +270,18 @@ async def websocket_endpoint(websocket: WebSocket, agent_id: str):
         logging.info(f"Agente '{agent_id}' desconectado.")
         del connected_agents[agent_id]
 
-# Endpoint de verificación de salud para Render
-@app.get("/")
-def health_check():
-    return {"status": "ok", "active_calls": len(active_calls), "connected_agents": len(connected_agents)}
+# # Endpoint de verificación de salud para Render
+# @app.get("/")
+# def health_check():
+#     return {"status": "ok", "active_calls": len(active_calls), "connected_agents": len(connected_agents)}
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend():
+    try:
+        with open("frontend/main.html") as f:
+            return HTMLResponse(content=f.read(), status_code=200)
+    except FileNotFoundError:
+        return HTMLResponse(content="<h1>Frontend no encontrado</h1><p>Asegúrate de que el archivo 'frontend/main.html' existe.</p>", status_code=404)
 
 # --- 7. EJECUCIÓN DEL SERVIDOR ---
 if __name__ == "__main__":
