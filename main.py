@@ -10,7 +10,7 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, R
 import uvicorn
 from fastapi.responses import HTMLResponse
 
-# --- Configuración Inicial ---
+# --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -21,37 +21,20 @@ ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 TURN_USERNAME = os.getenv("TURN_USERNAME")
 TURN_CREDENTIAL = os.getenv("TURN_CREDENTIAL")
 
-if not all([VERIFY_TOKEN, PHONE_NUMBER_ID, ACCESS_TOKEN]):
-    raise ValueError("Faltan variables de entorno críticas.")
+if not all([VERIFY_TOKEN, PHONE_NUMBER_ID, ACCESS_TOKEN, TURN_USERNAME, TURN_CREDENTIAL]):
+    raise ValueError("Faltan una o más variables de entorno críticas. Revisa tus variables en Render.")
 
-# --- Constantes y Configuración de la API ---
+# --- 2. CONSTANTES Y CONFIGURACIÓN GLOBAL ---
 WHATSAPP_API_URL = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/calls"
 HEADERS = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
-# Almacenes de estado en memoria para gestionar llamadas y agentes
+
 active_calls = {}
 connected_agents = {}
 
-# Inicialización de la aplicación FastAPI
-app = FastAPI(title="WhatsApp WebRTC Bridge (Solución Completa)")
+app = FastAPI(title="WhatsApp WebRTC Bridge (Final y Corregido)")
 
 # --- 3. CONFIGURACIÓN DE CORS ---
-# Permite que tu frontend se conecte a este backend.
-# En producción, reemplaza "*" con la URL específica de tu frontend para mayor seguridad.
-
-origins = [
-    # Añade la URL exacta desde la que estás sirviendo tu frontend localmente.
-    # No incluyas la ruta del archivo (/main.html), solo el origen.
-    "http://localhost:5500",
-
-    # Es buena práctica mantener estas por si usas otros puertos para probar.
-    "http://localhost",
-    "http://localhost:8000",
-    "https://callapi-bwst.onrender.com/"
-    
-    # Y esta para pruebas abriendo el archivo directamente.
-    "null"
-]
-
+origins = ["*"] 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -62,7 +45,6 @@ app.add_middleware(
 
 # --- 4. FUNCIONES AUXILIARES ---
 async def send_call_action(call_id: str, action: str, sdp: str = None):
-    """Envía acciones (pre_accept, accept, terminate) a la API de WhatsApp."""
     payload = {"messaging_product": "whatsapp", "call_id": call_id, "action": action}
     if sdp:
         payload["session"] = {"sdp_type": "answer", "sdp": sdp}
@@ -70,71 +52,14 @@ async def send_call_action(call_id: str, action: str, sdp: str = None):
         try:
             response = await client.post(WHATSAPP_API_URL, json=payload, headers=HEADERS)
             response.raise_for_status()
-            logging.info(f"Acción '{action}' enviada exitosamente para la llamada {call_id}.")
+            logging.info(f"Acción '{action}' enviada para la llamada {call_id}.")
             return response.json()
         except httpx.HTTPStatusError as e:
-            logging.error(f"Error al enviar la acción '{action}' para {call_id}: {e.response.text}")
+            logging.error(f"Error en la acción '{action}' para {call_id}: {e.response.text}")
             return None
 
-# --- 5. LÓGICA WEBRTC (EL PUENTE DE AUDIO) ---
-async def create_webrtc_bridge(session: dict, browser_sdp_offer: RTCSessionDescription):
-    """Crea y gestiona el puente de audio entre WhatsApp y el navegador."""
-    whatsapp_sdp_offer = session["whatsapp_sdp_offer"]
-    call_id = session["call_id"]
-    agent_websocket = session["agent_websocket"]
+# --- 5. ENDPOINTS DE LA API ---
 
-    # Configuración robusta de servidores ICE (STUN + TURN) para máxima conectividad
-    ice_servers = [
-        RTCIceServer(urls="stun:stun.l.google.com:19302"),
-        RTCIceServer(urls="stun:stun.relay.metered.ca:80"),
-        RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
-        RTCIceServer(urls="turn:global.relay.metered.ca:443", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
-        RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
-    ]
-    config = RTCConfiguration(iceServers=ice_servers)
-
-    # Crear las dos conexiones PeerConnection con la configuración ICE
-    whatsapp_pc = RTCPeerConnection(configuration=config)
-    browser_pc = RTCPeerConnection(configuration=config)
-    
-    session["whatsapp_pc"] = whatsapp_pc
-    session["browser_pc"] = browser_pc
-
-    # Definir cómo se transfiere el audio entre las conexiones
-    @whatsapp_pc.on("track")
-    async def on_whatsapp_track(track):
-        logging.info(f"Recibida pista de audio de WhatsApp para {call_id}. Añadiéndola al navegador.")
-        browser_pc.addTrack(track)
-
-    @browser_pc.on("track")
-    async def on_browser_track(track):
-        logging.info(f"Recibida pista de audio del navegador para {call_id}. Añadiéndola a WhatsApp.")
-        whatsapp_pc.addTrack(track)
-
-    # Negociación SDP
-    await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
-    await browser_pc.setRemoteDescription(browser_sdp_offer)
-
-    whatsapp_answer = await whatsapp_pc.createAnswer()
-    browser_answer = await browser_pc.createAnswer()
-
-    await whatsapp_pc.setLocalDescription(whatsapp_answer)
-    await browser_pc.setLocalDescription(browser_answer)
-
-    # Enviar respuestas a WhatsApp y al navegador
-    await send_call_action(call_id, "pre_accept", whatsapp_pc.localDescription.sdp)
-    await asyncio.sleep(1)
-    await send_call_action(call_id, "accept", whatsapp_pc.localDescription.sdp)
-
-    await agent_websocket.send_json({
-        "type": "answer_from_server",
-        "sdp": browser_pc.localDescription.sdp
-    })
-    session["status"] = "active"
-
-# --- 6. ENDPOINTS DE LA API ---
-
-# Endpoint de verificación para Meta (GET)
 @app.get("/webhook")
 def verify_webhook(request: Request):
     mode = request.query_params.get("hub.mode")
@@ -146,13 +71,8 @@ def verify_webhook(request: Request):
     logging.error("Fallo en la verificación del Webhook.")
     raise HTTPException(status_code=403, detail="Verification failed.")
 
-# Endpoint principal para recibir eventos de llamada (POST)
 @app.post("/webhook")
 async def receive_call_notification(request: Request):
-    """
-    Endpoint principal que recibe todas las notificaciones de eventos de llamada.
-    Implementa el flujo de señalización corregido.
-    """
     body = await request.json()
     logging.info("--- WEBHOOK RECIBIDO ---")
     logging.info(json.dumps(body, indent=2))
@@ -163,14 +83,12 @@ async def receive_call_notification(request: Request):
         event = call_data["event"]
 
         if event == "connect":
-            # Lógica simple: notificar siempre al agente "agent_001"
             agent_id_to_notify = "agent_001"
             agent_websocket = connected_agents.get(agent_id_to_notify)
 
             if agent_websocket:
                 logging.info(f"Iniciando negociación para {call_id} con el agente {agent_id_to_notify}")
                 
-                # Configuración de ICE (STUN + TURN)
                 ice_servers = [
                     RTCIceServer(urls="stun:stun.l.google.com:19302"),
                     RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
@@ -178,36 +96,27 @@ async def receive_call_notification(request: Request):
                 ]
                 config = RTCConfiguration(iceServers=ice_servers)
 
-                # 1. Crear la conexión PeerConnection para la "pata" de WhatsApp
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 
-                # Guardar la sesión inmediatamente
                 active_calls[call_id] = {
-                    "status": "negotiating",
-                    "call_id": call_id,
-                    "agent_websocket": agent_websocket,
-                    "whatsapp_pc": whatsapp_pc
+                    "status": "negotiating", "call_id": call_id,
+                    "agent_websocket": agent_websocket, "whatsapp_pc": whatsapp_pc
                 }
 
-                # Definir cómo se manejará el audio que llega de WhatsApp
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
-                    # Esta lógica es para el puente de audio, se conectará más tarde
                     logging.info(f"Recibida pista de audio de WhatsApp para {call_id}.")
                     session = active_calls.get(call_id)
                     if session and session.get("browser_pc"):
                         logging.info("Añadiendo pista de WhatsApp al navegador.")
                         session["browser_pc"].addTrack(track)
 
-                # 2. Establecer la oferta original de WhatsApp como la descripción remota
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=call_data["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
 
-                # 3. Crear una RESPUESTA para WhatsApp. Esta respuesta se convertirá en la OFERTA para el navegador.
                 answer_for_whatsapp = await whatsapp_pc.createAnswer()
                 await whatsapp_pc.setLocalDescription(answer_for_whatsapp)
 
-                # 4. Enviar esta descripción local (que es una respuesta a WhatsApp) como una OFERTA al navegador
                 logging.info(f"Enviando oferta al navegador para la llamada {call_id}")
                 await agent_websocket.send_json({
                     "type": "offer_from_server",
@@ -216,19 +125,15 @@ async def receive_call_notification(request: Request):
                     "sdp": whatsapp_pc.localDescription.sdp
                 })
             else:
-                # Si no hay agentes conectados, rechazar la llamada
                 logging.warning(f"Llamada {call_id} recibida, pero el agente {agent_id_to_notify} no está conectado. Rechazando.")
                 await send_call_action(call_id, "reject")
 
         elif event == "terminate":
-            # Limpiar la sesión cuando la llamada termina
             if call_id in active_calls:
                 session = active_calls[call_id]
-                # Notificar al frontend si todavía está conectado
                 if session.get("agent_websocket") and session["agent_websocket"].client_state.name == 'CONNECTED':
                     await session["agent_websocket"].send_json({"type": "call_terminated", "call_id": call_id})
                 
-                # Cerrar las conexiones WebRTC de forma segura
                 if session.get("whatsapp_pc"): await session["whatsapp_pc"].close()
                 if session.get("browser_pc"): await session["browser_pc"].close()
                 
@@ -242,7 +147,6 @@ async def receive_call_notification(request: Request):
 
     return Response(status_code=200)
 
-# Endpoint WebSocket para la conexión con el frontend
 @app.websocket("/ws/{agent_id}")
 async def websocket_endpoint(websocket: WebSocket, agent_id: str):
     await websocket.accept()
@@ -254,36 +158,57 @@ async def websocket_endpoint(websocket: WebSocket, agent_id: str):
             event_type = data.get("type")
             call_id = data.get("call_id")
 
-            # CAMBIO: Ahora esperamos una "answer_from_browser"
             if event_type == "answer_from_browser":
                 logging.info(f"Recibida RESPUESTA SDP del navegador para la llamada {call_id}")
                 session = active_calls.get(call_id)
                 if session:
-                    # La respuesta del navegador es la pieza final que necesitamos
-                    browser_sdp_answer = RTCSessionDescription(sdp=data["sdp"], type="answer")
-                    await create_webrtc_bridge(session, browser_sdp_answer)
+                    whatsapp_pc = session["whatsapp_pc"]
+                    
+                    # Crear la conexión para el navegador
+                    ice_servers = whatsapp_pc.getConfiguration().iceServers
+                    config = RTCConfiguration(iceServers=ice_servers)
+                    browser_pc = RTCPeerConnection(configuration=config)
+                    session["browser_pc"] = browser_pc
+
+                    @browser_pc.on("track")
+                    async def on_browser_track(track):
+                        logging.info(f"Recibida pista de audio del navegador para {call_id}.")
+                        whatsapp_pc.addTrack(track)
+
+                    # Establecer la respuesta del navegador como la descripción remota del PC del navegador
+                    browser_answer_sdp = RTCSessionDescription(sdp=data["sdp"], type="answer")
+                    await browser_pc.setRemoteDescription(browser_answer_sdp)
+                    
+                    # Crear una oferta para el navegador (necesario para completar la negociación)
+                    browser_offer = await browser_pc.createOffer()
+                    await browser_pc.setLocalDescription(browser_offer)
+                    
+                    # Ahora que ambas conexiones están listas, enviamos la respuesta a WhatsApp
+                    await send_call_action(call_id, "pre_accept", whatsapp_pc.localDescription.sdp)
+                    await asyncio.sleep(1)
+                    await send_call_action(call_id, "accept", whatsapp_pc.localDescription.sdp)
+                    
+                    session["status"] = "active"
+                    logging.info(f"Puente WebRTC para la llamada {call_id} completado y activo.")
+
             elif event_type == "hangup_from_browser":
                 logging.info(f"Agente colgó la llamada {call_id} desde el navegador.")
                 if call_id in active_calls:
                     await send_call_action(call_id, "terminate")
     except WebSocketDisconnect:
         logging.info(f"Agente '{agent_id}' desconectado.")
-        del connected_agents[agent_id]
-
-# # Endpoint de verificación de salud para Render
-# @app.get("/")
-# def health_check():
-#     return {"status": "ok", "active_calls": len(active_calls), "connected_agents": len(connected_agents)}
+        if agent_id in connected_agents:
+            del connected_agents[agent_id]
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
     try:
-        with open("frontend/main.html") as f:
+        with open("main.html") as f: 
             return HTMLResponse(content=f.read(), status_code=200)
     except FileNotFoundError:
-        return HTMLResponse(content="<h1>Frontend no encontrado</h1><p>Asegúrate de que el archivo 'frontend/main.html' existe.</p>", status_code=404)
+        return HTMLResponse(content="<h1>Frontend no encontrado. Asegúrate de que el archivo 'main.html' está en la raíz del proyecto.</h1>", status_code=404)
 
-# --- 7. EJECUCIÓN DEL SERVIDOR ---
+# --- 6. EJECUCIÓN DEL SERVIDOR ---
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
