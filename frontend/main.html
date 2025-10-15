@@ -15,13 +15,13 @@
         .call-controls button { padding: 0.8rem 1.5rem; font-size: 1rem; border: none; border-radius: 6px; cursor: pointer; margin: 0 0.5rem; transition: background-color 0.2s; }
         .answer-btn { background-color: #42b72a; color: white; }
         .answer-btn:hover { background-color: #36a420; }
-        .reject-btn, .hangup-btn { background-color: #fa383e; color: white; }
-        .reject-btn:hover, .hangup-btn:hover { background-color: #e02c32; }
+        .hangup-btn { background-color: #fa383e; color: white; }
+        .hangup-btn:hover { background-color: #e02c32; }
         .mute-btn { background-color: #606770; color: white; }
         .mute-btn.muted { background-color: #31a24c; }
         .view { display: none; }
         #caller-info, #call-timer { font-weight: bold; margin-bottom: 1rem; font-size: 1.2rem; }
-        audio { margin-top: 1rem; width: 100%; display: none; }
+        audio { display: none; } /* El audio se reproduce, pero el control no es visible */
     </style>
 </head>
 <body>
@@ -37,7 +37,6 @@
             <p id="caller-info">Llamada entrante...</p>
             <div class="call-controls">
                 <button id="answer-button" class="answer-btn">Contestar</button>
-                <button id="reject-button" class="reject-btn">Rechazar</button>
             </div>
         </div>
 
@@ -58,7 +57,7 @@
         let localStream;
         let currentCallId = null;
         let timerInterval = null;
-        let appState = 'IDLE'; // IDLE, RINGING, CONNECTING, ACTIVE
+        let appState = 'IDLE';
 
         // --- DOM Elements ---
         const statusEl = document.getElementById('status');
@@ -68,7 +67,6 @@
         const callerInfoEl = document.getElementById('caller-info');
         const callTimerEl = document.getElementById('call-timer');
         const answerButton = document.getElementById('answer-button');
-        const rejectButton = document.getElementById('reject-button');
         const hangupButton = document.getElementById('hangup-button');
         const muteButton = document.getElementById('mute-button');
         const remoteAudioEl = document.getElementById('remote-audio');
@@ -138,28 +136,42 @@
             browser_pc.oniceconnectionstatechange = () => {
                 console.log(`Estado de conexión ICE: ${browser_pc.iceConnectionState}`);
                 if (browser_pc.iceConnectionState === 'connected' || browser_pc.iceConnectionState === 'completed') {
-                    updateUI('ACTIVE');
-                    startTimer();
+                    if(appState !== 'ACTIVE') {
+                        updateUI('ACTIVE');
+                        startTimer();
+                    }
                 } else if (browser_pc.iceConnectionState === 'failed' || browser_pc.iceConnectionState === 'disconnected') {
                     reset();
                 }
             };
 
             browser_pc.ontrack = (event) => {
-                console.log("Recibida pista de audio remota.");
+                console.log("Recibida pista de audio remota (del llamante).");
                 if (remoteAudioEl.srcObject !== event.streams[0]) {
                     remoteAudioEl.srcObject = event.streams[0];
                 }
             };
 
             try {
+                // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                // ESTA ES LA PARTE MÁS IMPORTANTE QUE SOLUCIONA EL PROBLEMA DE "NO MEDIA"
+                // 1. Pedir acceso al micrófono. El navegador mostrará un popup de permisos.
+                console.log("Solicitando acceso al micrófono...");
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-                localStream.getTracks().forEach(track => browser_pc.addTrack(track, localStream));
+                
+                // 2. Una vez obtenido el permiso, añadir las pistas de audio del micrófono a la conexión.
+                // Esto asegura que tu voz se envíe a través de WebRTC.
+                localStream.getTracks().forEach(track => {
+                    console.log("Añadiendo pista de audio local (micrófono) a la conexión.");
+                    browser_pc.addTrack(track, localStream);
+                });
+                // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
                 await browser_pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
                 const answer = await browser_pc.createAnswer();
                 await browser_pc.setLocalDescription(answer);
 
+                console.log("Enviando respuesta SDP del navegador al servidor.");
                 ws.send(JSON.stringify({
                     type: 'answer_from_browser',
                     call_id: currentCallId,
@@ -181,13 +193,6 @@
             }
         }
 
-        function rejectCall() {
-            if (currentCallId && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'reject_call', call_id: currentCallId }));
-            }
-            reset();
-        }
-
         function hangup() {
             if (currentCallId && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'hangup_from_browser', call_id: currentCallId }));
@@ -206,7 +211,7 @@
 
         function startTimer() {
             let startTime = Date.now();
-            stopTimer(); // Asegurarse de que no haya timers corriendo
+            stopTimer();
             timerInterval = setInterval(() => {
                 const elapsed = Math.floor((Date.now() - startTime) / 1000);
                 const minutes = String(Math.floor(elapsed / 60)).padStart(2, '0');
@@ -238,7 +243,6 @@
 
         // --- Event Listeners ---
         answerButton.addEventListener('click', answerCall);
-        rejectButton.addEventListener('click', rejectCall);
         hangupButton.addEventListener('click', hangup);
         muteButton.addEventListener('click', toggleMute);
 
