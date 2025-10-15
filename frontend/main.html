@@ -3,232 +3,237 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Agente WebRTC para WhatsApp (Corregido)</title>
+    <title>Panel de Agente - Llamadas de WhatsApp</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: #f0f2f5;
-            color: #1c1e21;
             display: flex;
             justify-content: center;
             align-items: center;
             height: 100vh;
             margin: 0;
+            background-color: #f0f2f5;
+            color: #1c1e21;
         }
-        .phone-container {
-            background-color: white;
-            border-radius: 24px;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
-            padding: 32px;
+        .container {
+            background-color: #fff;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
             text-align: center;
-            width: 340px;
-            border: 1px solid #ddd;
+            width: 90%;
+            max-width: 400px;
         }
         h1 {
-            font-size: 1.6em;
-            margin-top: 0;
-            margin-bottom: 20px;
-            color: #000;
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
         }
         #status {
-            font-size: 1.1em;
-            margin-bottom: 25px;
-            padding: 12px;
-            border-radius: 8px;
-            font-weight: 500;
-            transition: background-color 0.3s, color 0.3s;
+            font-size: 1rem;
+            margin-bottom: 1.5rem;
+            padding: 0.5rem;
+            border-radius: 4px;
         }
-        .status-disconnected { background-color: #f8d7da; color: #721c24; }
-        .status-connected { background-color: #d4edda; color: #155724; }
-        .status-ringing { background-color: #fff3cd; color: #856404; animation: pulse 1.5s infinite ease-in-out; }
-        .status-active { background-color: #cce5ff; color: #004085; }
-        .controls { display: flex; justify-content: center; gap: 20px; }
-        .controls button {
-            font-size: 1.2em;
-            width: 70px;
-            height: 70px;
-            cursor: pointer;
-            border-radius: 50%;
+        .status-connecting { color: #f5a623; background-color: #fffbe6; }
+        .status-connected { color: #2e7d32; background-color: #e8f5e9; }
+        .status-disconnected { color: #d32f2f; background-color: #ffebee; }
+        .call-controls button {
+            padding: 0.8rem 1.5rem;
+            font-size: 1rem;
             border: none;
-            color: white;
-            transition: background-color 0.2s, transform 0.1s;
-            display: flex;
-            justify-content: center;
-            align-items: center;
+            border-radius: 6px;
+            cursor: pointer;
+            margin: 0 0.5rem;
+            transition: background-color 0.2s;
         }
-        .controls button:active { transform: scale(0.95); }
-        #acceptBtn { background-color: #28a745; }
-        #rejectBtn, #hangupBtn { background-color: #dc3545; }
-        button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.6; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+        .answer-btn { background-color: #42b72a; color: white; }
+        .answer-btn:hover { background-color: #36a420; }
+        .hangup-btn { background-color: #fa383e; color: white; }
+        .hangup-btn:hover { background-color: #e02c32; }
+        #incoming-call-alert {
+            display: none;
+            margin-bottom: 1rem;
+        }
+        #in-call-view {
+            display: none;
+        }
+        #caller-info {
+            font-weight: bold;
+            margin-bottom: 1rem;
+        }
+        audio {
+            margin-top: 1rem;
+            width: 100%;
+        }
     </style>
 </head>
 <body>
-    <div class="phone-container">
-        <h1>Agente de Llamadas</h1>
-        <div id="status" class="status-disconnected">Desconectado</div>
-        <div class="controls">
-            <button id="acceptBtn" disabled title="Aceptar">
-                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16"><path d="M3.654 1.328a.678.678 0 0 0-1.015-.063L1.605 2.3c-.483.484-.661 1.169-.45 1.77a17.6 17.6 0 0 0 4.168 6.608 17.6 17.6 0 0 0 6.608 4.168c.601.211 1.286.033 1.77-.45l1.034-1.034a.678.678 0 0 0-.063-1.015l-2.307-1.794a.68.68 0 0 0-.58-.122l-2.19.547a1.75 1.75 0 0 1-1.657-.459L5.482 8.062a1.75 1.75 0 0 1-.46-1.657l.548-2.19a.68.68 0 0 0-.122-.58z"/></svg>
-            </button>
-            <button id="rejectBtn" disabled title="Rechazar">
-                 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16"><path d="M3.654 1.328a.678.678 0 0 0-1.015-.063L1.605 2.3c-.483.484-.661 1.169-.45 1.77a17.6 17.6 0 0 0 4.168 6.608 17.6 17.6 0 0 0 6.608 4.168c.601.211 1.286.033 1.77-.45l1.034-1.034a.678.678 0 0 0-.063-1.015l-2.307-1.794a.68.68 0 0 0-.58-.122l-2.19.547a1.75 1.75 0 0 1-1.657-.459L5.482 8.062a1.75 1.75 0 0 1-.46-1.657l.548-2.19a.68.68 0 0 0-.122-.58z" transform="rotate(135 8 8)"/></svg>
-            </button>
-            <button id="hangupBtn" style="display:none;" title="Colgar">
-                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16"><path d="M3.654 1.328a.678.678 0 0 0-1.015-.063L1.605 2.3c-.483.484-.661 1.169-.45 1.77a17.6 17.6 0 0 0 4.168 6.608 17.6 17.6 0 0 0 6.608 4.168c.601.211 1.286.033 1.77-.45l1.034-1.034a.678.678 0 0 0-.063-1.015l-2.307-1.794a.68.68 0 0 0-.58-.122l-2.19.547a1.75 1.75 0 0 1-1.657-.459L5.482 8.062a1.75 1.75 0 0 1-.46-1.657l.548-2.19a.68.68 0 0 0-.122-.58z" transform="rotate(135 8 8)"/></svg>
-            </button>
+    <div class="container">
+        <h1>Panel de Llamadas</h1>
+        <p id="status" class="status-connecting">Estado: Conectando al servidor...</p>
+
+        <!-- Alerta de llamada entrante -->
+        <div id="incoming-call-alert">
+            <p id="caller-info">Llamada entrante...</p>
+            <div class="call-controls">
+                <button id="answer-button" class="answer-btn">Contestar</button>
+            </div>
+        </div>
+
+        <!-- Vista durante la llamada -->
+        <div id="in-call-view">
+            <p>Llamada en curso...</p>
+            <audio id="remote-audio" autoplay playsinline></audio>
+            <div class="call-controls">
+                <button id="hangup-button" class="hangup-btn">Colgar</button>
+            </div>
         </div>
     </div>
-    
-    <audio id="remoteAudio" autoplay></audio>
 
     <script>
-        // --- CONFIGURACIÓN ---
-        const BACKEND_HOST = "callapi-bwst.onrender.com"; // ¡REEMPLAZA CON TU URL!
-        const AGENT_ID = "agent_001";
+        // --- Variables Globales ---
+        let ws;
+        let browser_pc;
+        let currentCallId = null;
 
-        // --- ELEMENTOS DEL DOM Y ESTADO ---
-        const statusDiv = document.getElementById('status');
-        const acceptBtn = document.getElementById('acceptBtn');
-        const rejectBtn = document.getElementById('rejectBtn');
-        const hangupBtn = document.getElementById('hangupBtn');
-        const remoteAudio = document.getElementById('remoteAudio');
-        
-        let ws, peerConnection, currentCallId, serverOfferSdp;
+        // --- Elementos del DOM ---
+        const statusEl = document.getElementById('status');
+        const incomingCallAlertEl = document.getElementById('incoming-call-alert');
+        const inCallViewEl = document.getElementById('in-call-view');
+        const callerInfoEl = document.getElementById('caller-info');
+        const answerButton = document.getElementById('answer-button');
+        const hangupButton = document.getElementById('hangup-button');
+        const remoteAudioEl = document.getElementById('remote-audio');
 
+        // --- Lógica de WebSocket ---
         function connectWebSocket() {
-            const wsUrl = `wss://${BACKEND_HOST}/ws/${AGENT_ID}`;
-            console.log(`Intentando conectar a: ${wsUrl}`);
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host;
+            const wsUrl = `${protocol}//${host}/ws`;
+
+            console.log(`Conectando al lobby en: ${wsUrl}`);
             ws = new WebSocket(wsUrl);
 
-            ws.onopen = () => updateStatus(`Conectado como ${AGENT_ID}`, 'status-connected');
+            ws.onopen = () => {
+                console.log("Conectado al lobby de llamadas.");
+                statusEl.textContent = 'Estado: Listo para recibir llamadas';
+                statusEl.className = 'status-connected';
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log("Mensaje del servidor:", data);
+
+                switch (data.type) {
+                    case 'incoming_call':
+                        handleIncomingCall(data);
+                        break;
+                    case 'offer_from_server':
+                        handleOfferFromServer(data);
+                        break;
+                    case 'call_terminated':
+                        console.log("El servidor informa que la llamada ha terminado.");
+                        resetUI();
+                        break;
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error("Error de WebSocket:", error);
+                statusEl.textContent = 'Error: Conexión perdida con el servidor.';
+                statusEl.className = 'status-disconnected';
+            };
+
             ws.onclose = () => {
-                updateStatus('Desconectado. Reintentando...', 'status-disconnected');
-                setTimeout(connectWebSocket, 3000);
+                console.warn("Conexión WebSocket cerrada. Intentando reconectar en 5 segundos...");
+                statusEl.textContent = 'Estado: Desconectado. Reconectando...';
+                statusEl.className = 'status-disconnected';
+                setTimeout(connectWebSocket, 5000);
             };
-            ws.onerror = (err) => {
-                console.error("Error de WebSocket:", err);
-                ws.close();
-            };
-            ws.onmessage = handleServerMessage;
         }
 
-        function updateStatus(text, className) {
-            statusDiv.textContent = text;
-            statusDiv.className = className;
-        }
-
-        function setControlsState(state) {
-            const isRinging = state === 'ringing';
-            const isActive = state === 'active';
-            
-            acceptBtn.disabled = !isRinging;
-            rejectBtn.disabled = !isRinging;
-            
-            acceptBtn.style.display = isActive ? 'none' : 'inline-flex';
-            rejectBtn.style.display = isActive ? 'none' : 'inline-flex';
-            hangupBtn.style.display = isActive ? 'inline-flex' : 'none';
-        }
-
-        async function handleServerMessage(event) {
-            const data = JSON.parse(event.data);
-            console.log("Mensaje del servidor:", data);
-
-            switch (data.type) {
-                case "offer_from_server":
-                    currentCallId = data.call_id;
-                    serverOfferSdp = data.sdp;
-                    updateStatus(`Llamada entrante de ${data.from}...`, 'status-ringing');
-                    setControlsState('ringing');
-                    break;
-                
-                case "answer_from_server":
-                    if (peerConnection) {
-                        console.log("Recibida respuesta del servidor, estableciendo descripción remota.");
-                        await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }));
-                    }
-                    break;
-
-                case "call_terminated":
-                    hangup(false);
-                    break;
-            }
-        }
-
-        async function acceptCall() {
-            if (!serverOfferSdp) {
-                console.error("No hay oferta del servidor para aceptar.");
+        // --- Lógica de Manejo de Llamadas ---
+        function handleIncomingCall(data) {
+            if (currentCallId) {
+                console.warn("Ya hay una llamada en curso o sonando, ignorando nueva llamada.");
                 return;
             }
+            currentCallId = data.call_id;
+            callerInfoEl.textContent = `Llamada entrante de: ${data.from}`;
+            incomingCallAlertEl.style.display = 'block';
+        }
 
-            setControlsState('connecting');
-            updateStatus('Conectando...', 'status-active');
+        async function handleOfferFromServer(data) {
+            console.log("Recibida oferta SDP del servidor, iniciando WebRTC.");
+            
+            browser_pc = new RTCPeerConnection();
 
-            peerConnection = new RTCPeerConnection();
-
-            peerConnection.ontrack = (event) => {
-                console.log("Recibiendo pista de audio remota...");
-                if (remoteAudio.srcObject !== event.streams[0]) {
-                    remoteAudio.srcObject = event.streams[0];
+            browser_pc.ontrack = (event) => {
+                console.log("Recibida pista de audio remota.");
+                if (remoteAudioEl.srcObject !== event.streams[0]) {
+                    remoteAudioEl.srcObject = event.streams[0];
                 }
             };
 
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-                stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
-            } catch (err) {
-                alert("No se pudo acceder al micrófono. Por favor, concede los permisos.");
-                hangup(false);
-                return;
-            }
+                await browser_pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
+                const answer = await browser_pc.createAnswer();
+                await browser_pc.setLocalDescription(answer);
 
-            try {
-                // 1. Establecer la oferta del servidor como descripción remota
-                await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: serverOfferSdp }));
-                
-                // 2. Crear una RESPUESTA
-                const answer = await peerConnection.createAnswer();
-                await peerConnection.setLocalDescription(answer);
-
-                // 3. Enviar la RESPUESTA al backend
+                console.log("Enviando respuesta SDP del navegador al servidor.");
                 ws.send(JSON.stringify({
-                    type: "answer_from_browser",
+                    type: 'answer_from_browser',
                     call_id: currentCallId,
-                    sdp: peerConnection.localDescription.sdp
+                    sdp: browser_pc.localDescription.sdp
                 }));
-                
-                setControlsState('active');
-                updateStatus(`Llamada activa`, 'status-active');
 
-            } catch (err) {
-                console.error("Fallo en la negociación WebRTC:", err);
-                hangup(false);
+                inCallViewEl.style.display = 'block';
+
+            } catch (error) {
+                console.error("Error durante la negociación WebRTC:", error);
+                resetUI();
             }
         }
 
-        function hangup(notifyBackend = true) {
-            if (peerConnection) {
-                peerConnection.close();
-                peerConnection = null;
+        function answerCall() {
+            if (currentCallId && ws.readyState === WebSocket.OPEN) {
+                console.log(`Enviando solicitud para contestar la llamada: ${currentCallId}`);
+                ws.send(JSON.stringify({
+                    type: 'answer_call',
+                    call_id: currentCallId
+                }));
+                incomingCallAlertEl.style.display = 'none';
             }
-            if (notifyBackend && currentCallId) {
-                ws.send(JSON.stringify({ type: "hangup_from_browser", call_id: currentCallId }));
+        }
+
+        function hangup() {
+            if (currentCallId && ws.readyState === WebSocket.OPEN) {
+                console.log(`Enviando solicitud para colgar la llamada: ${currentCallId}`);
+                ws.send(JSON.stringify({
+                    type: 'hangup_from_browser',
+                    call_id: currentCallId
+                }));
             }
-            updateStatus(`Conectado como ${AGENT_ID}`, 'status-connected');
-            setControlsState('connected');
+            resetUI();
+        }
+
+        function resetUI() {
+            console.log("Reseteando la interfaz de usuario.");
+            if (browser_pc) {
+                browser_pc.close();
+                browser_pc = null;
+            }
+            remoteAudioEl.srcObject = null;
             currentCallId = null;
-            serverOfferSdp = null;
+            incomingCallAlertEl.style.display = 'none';
+            inCallViewEl.style.display = 'none';
         }
 
-        // --- EVENT LISTENERS ---
-        acceptBtn.onclick = acceptCall;
-        hangupBtn.onclick = () => hangup(true);
-        rejectBtn.onclick = () => {
-            // Para rechazar, simplemente colgamos sin haber aceptado
-            hangup(true); 
-        };
+        // --- Event Listeners ---
+        answerButton.addEventListener('click', answerCall);
+        hangupButton.addEventListener('click', hangup);
 
-        // Iniciar la conexión al cargar la página
+        // --- Iniciar la aplicación ---
         connectWebSocket();
     </script>
 </body>

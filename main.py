@@ -26,16 +26,16 @@ TURN_USERNAME = os.getenv("TURN_USERNAME")
 TURN_CREDENTIAL = os.getenv("TURN_CREDENTIAL")
 
 if not all([VERIFY_TOKEN, PHONE_NUMBER_ID, ACCESS_TOKEN, TURN_USERNAME, TURN_CREDENTIAL]):
-    raise ValueError("Faltan una o más variables de entorno críticas. Revisa tus variables.")
+    raise ValueError("Faltan una o más variables de entorno críticas.")
 
 # --- 2. CONSTANTES Y CONFIGURACIÓN GLOBAL ---
 WHATSAPP_API_URL = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/calls"
 HEADERS = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
 
 active_calls = {}
-connected_agents = {}
+lobby_clients = set() # Usamos un set para todos los frontends conectados
 
-app = FastAPI(title="WhatsApp WebRTC Bridge - Versión Final Funcional")
+app = FastAPI(title="WhatsApp WebRTC Bridge - Dynamic Lobby")
 
 # --- 3. CONFIGURACIÓN DE CORS ---
 app.add_middleware(
@@ -66,6 +66,17 @@ async def send_call_action(call_id: str, action: str, sdp: str = None):
             logging.error(f"Error inesperado en send_call_action para {call_id}: {e}")
             return None
 
+async def broadcast_to_lobby(message: dict):
+    """Envía un mensaje a todos los clientes conectados en el lobby."""
+    disconnected_clients = set()
+    for client in lobby_clients:
+        try:
+            await client.send_json(message)
+        except Exception:
+            disconnected_clients.add(client)
+    for client in disconnected_clients:
+        lobby_clients.discard(client)
+
 # --- 5. ENDPOINTS DE LA API ---
 
 @app.get("/webhook")
@@ -74,7 +85,6 @@ def verify_webhook(request: Request):
             request.query_params.get("hub.verify_token") == VERIFY_TOKEN):
         logging.info("WEBHOOK VERIFICADO CON ÉXITO")
         return Response(content=request.query_params.get("hub.challenge"))
-    logging.error("Fallo en la verificación del Webhook.")
     raise HTTPException(status_code=403, detail="Verification failed.")
 
 @app.post("/webhook")
@@ -89,65 +99,35 @@ async def receive_call_notification(request: Request):
         event = call_data.get("event")
 
         if event == "connect":
-            agent_id_to_notify = "agent_001"
-            agent_websocket = connected_agents.get(agent_id_to_notify)
-
-            if not agent_websocket:
-                logging.warning(f"Llamada {call_id} recibida, pero el agente {agent_id_to_notify} no está conectado. Rechazando.")
+            if not lobby_clients:
+                logging.warning(f"Llamada {call_id} recibida, pero no hay agentes en el lobby. Rechazando.")
                 await send_call_action(call_id, "reject")
                 return Response(status_code=200)
 
-            logging.info(f"Iniciando negociación para {call_id} con el agente {agent_id_to_notify}")
-            
-            ice_servers = [
-                RTCIceServer(urls="stun:stun.l.google.com:19302"),
-                RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
-                RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
-            ]
-            config = RTCConfiguration(iceServers=ice_servers)
-            whatsapp_pc = RTCPeerConnection(configuration=config)
-            
+            # Guardamos la información de la llamada, esperando que un agente la tome
             active_calls[call_id] = {
-                "status": "negotiating", "call_id": call_id,
-                "agent_websocket": agent_websocket, "whatsapp_pc": whatsapp_pc,
+                "status": "ringing",
+                "call_data": call_data,
                 "pending_whatsapp_tracks": []
             }
-
-            @whatsapp_pc.on("track")
-            async def on_whatsapp_track(track):
-                logging.info(f"Recibida pista de WhatsApp [ID: {track.id}] para {call_id}.")
-                session = active_calls.get(call_id)
-                if not session: return
-
-                browser_pc = session.get("browser_pc")
-                if browser_pc and browser_pc.connectionState != "closed":
-                    logging.info(f"Añadiendo pista de WhatsApp {track.id} al navegador.")
-                    browser_pc.addTrack(track)
-                else:
-                    logging.warning(f"Navegador no listo. Poniendo pista {track.id} en cola.")
-                    session["pending_whatsapp_tracks"].append(track)
-
-            # Usamos "sendrecv" para que la negociación inicial sea completa
-            whatsapp_pc.addTransceiver("audio", direction="sendrecv")
             
-            whatsapp_sdp_offer = RTCSessionDescription(sdp=call_data["session"]["sdp"], type="offer")
-            await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
-
-            answer_for_whatsapp = await whatsapp_pc.createAnswer()
-            await whatsapp_pc.setLocalDescription(answer_for_whatsapp)
-
-            logging.info(f"Enviando oferta al navegador para la llamada {call_id}")
-            await agent_websocket.send_json({
-                "type": "offer_from_server", "call_id": call_id,
-                "from": body["entry"][0]["changes"][0]["value"]["contacts"][0].get('profile', {}).get('name', 'Desconocido'),
-                "sdp": whatsapp_pc.localDescription.sdp
+            # Notificamos a todos en el lobby sobre la nueva llamada
+            caller_name = body["entry"][0]["changes"][0]["value"]["contacts"][0].get('profile', {}).get('name', 'Desconocido')
+            await broadcast_to_lobby({
+                "type": "incoming_call",
+                "call_id": call_id,
+                "from": caller_name
             })
+            logging.info(f"Notificando al lobby sobre la llamada entrante {call_id} de {caller_name}")
 
         elif event == "terminate":
             if call_id in active_calls:
-                session = active_calls[call_id]
-                if session.get("agent_websocket") and session["agent_websocket"].client_state.name == 'CONNECTED':
-                    await session["agent_websocket"].send_json({"type": "call_terminated", "call_id": call_id})
+                session = active_calls.get(call_id, {})
+                agent_ws = session.get("agent_websocket")
+                if agent_ws:
+                    try:
+                        await agent_ws.send_json({"type": "call_terminated", "call_id": call_id})
+                    except Exception: pass
                 
                 if session.get("whatsapp_pc"): await session["whatsapp_pc"].close()
                 if session.get("browser_pc"): await session["browser_pc"].close()
@@ -160,22 +140,56 @@ async def receive_call_notification(request: Request):
 
     return Response(status_code=200)
 
-@app.websocket("/ws/{agent_id}")
-async def websocket_endpoint(websocket: WebSocket, agent_id: str):
+@app.websocket("/ws") # Endpoint de WebSocket genérico, sin agent_id
+async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    connected_agents[agent_id] = websocket
-    logging.info(f"Agente '{agent_id}' conectado vía WebSocket.")
+    lobby_clients.add(websocket)
+    logging.info(f"Nuevo cliente conectado al lobby. Total: {len(lobby_clients)}")
     try:
         while True:
             data = await websocket.receive_json()
             event_type = data.get("type")
             call_id = data.get("call_id")
 
-            if event_type == "answer_from_browser":
-                logging.info(f"Recibida RESPUESTA SDP del navegador para la llamada {call_id}")
-                session = active_calls.get(call_id)
-                if not session: continue
+            session = active_calls.get(call_id)
+            if not session:
+                logging.warning(f"Recepción de evento '{event_type}' para llamada no activa o ya tomada: {call_id}")
+                continue
 
+            if event_type == "answer_call":
+                # Un agente ha hecho clic en "Contestar". Iniciamos la negociación WebRTC con él.
+                logging.info(f"Agente {websocket.client} ha contestado la llamada {call_id}. Iniciando negociación.")
+                
+                session["status"] = "negotiating"
+                session["agent_websocket"] = websocket
+
+                ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:19302"), RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL)]
+                config = RTCConfiguration(iceServers=ice_servers)
+                whatsapp_pc = RTCPeerConnection(configuration=config)
+                session["whatsapp_pc"] = whatsapp_pc
+
+                @whatsapp_pc.on("track")
+                async def on_whatsapp_track(track):
+                    if call_id in active_calls and active_calls[call_id].get("browser_pc"):
+                        active_calls[call_id]["browser_pc"].addTrack(track)
+                    else:
+                        active_calls[call_id]["pending_whatsapp_tracks"].append(track)
+
+                whatsapp_pc.addTransceiver("audio", direction="sendrecv")
+                whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
+                await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
+                answer = await whatsapp_pc.createAnswer()
+                await whatsapp_pc.setLocalDescription(answer)
+
+                await websocket.send_json({
+                    "type": "offer_from_server",
+                    "call_id": call_id,
+                    "sdp": whatsapp_pc.localDescription.sdp
+                })
+
+            elif event_type == "answer_from_browser":
+                logging.info(f"Recibida RESPUESTA SDP del navegador para la llamada {call_id}")
+                
                 whatsapp_pc = session["whatsapp_pc"]
                 config = whatsapp_pc.configuration
                 browser_pc = RTCPeerConnection(configuration=config)
@@ -183,7 +197,6 @@ async def websocket_endpoint(websocket: WebSocket, agent_id: str):
 
                 @browser_pc.on("track")
                 async def on_browser_track(track):
-                    logging.info(f"Recibida pista de audio del navegador para {call_id}.")
                     if whatsapp_pc and whatsapp_pc.connectionState != "closed":
                         whatsapp_pc.addTrack(track)
 
@@ -191,10 +204,9 @@ async def websocket_endpoint(websocket: WebSocket, agent_id: str):
                 browser_answer_sdp = RTCSessionDescription(sdp=data["sdp"], type="answer")
                 await browser_pc.setLocalDescription(browser_answer_sdp)
                 
-                if session.get("pending_whatsapp_tracks"):
-                    for track in session["pending_whatsapp_tracks"]:
-                        browser_pc.addTrack(track)
-                    session["pending_whatsapp_tracks"] = []
+                for track in session.get("pending_whatsapp_tracks", []):
+                    browser_pc.addTrack(track)
+                session["pending_whatsapp_tracks"] = []
 
                 # --- INICIO DE LA LÓGICA GANADORA: CONSTRUCCIÓN MANUAL DEL SDP ---
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
@@ -256,9 +268,8 @@ async def websocket_endpoint(websocket: WebSocket, agent_id: str):
                     await send_call_action(call_id, "terminate")
                     
     except WebSocketDisconnect:
-        logging.info(f"Agente '{agent_id}' desconectado.")
-        if agent_id in connected_agents:
-            del connected_agents[agent_id]
+        lobby_clients.discard(websocket)
+        logging.info(f"Cliente desconectado del lobby. Total: {len(lobby_clients)}")
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
