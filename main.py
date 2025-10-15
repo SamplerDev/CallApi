@@ -36,7 +36,20 @@ app = FastAPI(title="WhatsApp WebRTC Bridge (Solución Completa)")
 # --- 3. CONFIGURACIÓN DE CORS ---
 # Permite que tu frontend se conecte a este backend.
 # En producción, reemplaza "*" con la URL específica de tu frontend para mayor seguridad.
-origins = ["*"] 
+
+origins = [
+    # Añade la URL exacta desde la que estás sirviendo tu frontend localmente.
+    # No incluyas la ruta del archivo (/main.html), solo el origen.
+    "http://localhost:5500",
+
+    # Es buena práctica mantener estas por si usas otros puertos para probar.
+    "http://localhost",
+    "http://localhost:8000",
+    
+    # Y esta para pruebas abriendo el archivo directamente.
+    "null"
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
