@@ -148,7 +148,6 @@ async def receive_call_notification(request: Request):
     return Response(status_code=200)
 
 @app.websocket("/ws/{agent_id}")
-@app.websocket("/ws/{agent_id}")
 async def websocket_endpoint(websocket: WebSocket, agent_id: str):
     await websocket.accept()
     connected_agents[agent_id] = websocket
@@ -162,42 +161,36 @@ async def websocket_endpoint(websocket: WebSocket, agent_id: str):
             if event_type == "answer_from_browser":
                 logging.info(f"Recibida RESPUESTA SDP del navegador para la llamada {call_id}")
                 session = active_calls.get(call_id)
-                if not session:
-                    logging.warning(f"No se encontró sesión para la llamada {call_id} al recibir respuesta del navegador.")
-                    continue
+                if session:
+                    whatsapp_pc = session["whatsapp_pc"]
+                    
+                    # --- CORRECCIÓN APLICADA AQUÍ ---
+                    # Usamos .configuration en lugar de .getConfiguration()
+                    ice_servers = whatsapp_pc.configuration.iceServers
+                    config = RTCConfiguration(iceServers=ice_servers)
+                    browser_pc = RTCPeerConnection(configuration=config)
+                    session["browser_pc"] = browser_pc
 
-                whatsapp_pc = session["whatsapp_pc"]
-                browser_answer_sdp = RTCSessionDescription(sdp=data["sdp"], type="answer")
+                    @browser_pc.on("track")
+                    async def on_browser_track(track):
+                        logging.info(f"Recibida pista de audio del navegador para {call_id}.")
+                        if whatsapp_pc and whatsapp_pc.connectionState != "closed":
+                            whatsapp_pc.addTrack(track)
 
-                # --- LÓGICA CORREGIDA ---
-                # El flujo correcto es:
-                # 1. Crear la conexión del navegador.
-                # 2. Añadirle la pista de audio del micrófono del agente.
-                # 3. Establecer la descripción remota (la oferta que le enviamos originalmente).
-                # 4. Establecer la descripción local (la respuesta que nos acaba de enviar).
-                # 5. ¡Y LISTO! Ahora el puente está completo y podemos aceptar la llamada en WhatsApp.
-
-                ice_servers = whatsapp_pc.getConfiguration().iceServers
-                config = RTCConfiguration(iceServers=ice_servers)
-                browser_pc = RTCPeerConnection(configuration=config)
-                session["browser_pc"] = browser_pc
-
-                @browser_pc.on("track")
-                async def on_browser_track(track):
-                    logging.info(f"Recibida pista de audio del navegador para {call_id}.")
-                    whatsapp_pc.addTrack(track)
-
-                # La oferta que el navegador usó para crear su respuesta es la descripción local de whatsapp_pc
-                await browser_pc.setRemoteDescription(whatsapp_pc.localDescription)
-                await browser_pc.setLocalDescription(browser_answer_sdp)
-                
-                # Ahora que el puente está listo, aceptamos la llamada en WhatsApp
-                await send_call_action(call_id, "pre_accept", whatsapp_pc.localDescription.sdp)
-                await asyncio.sleep(1)
-                await send_call_action(call_id, "accept", whatsapp_pc.localDescription.sdp)
-                
-                session["status"] = "active"
-                logging.info(f"Puente WebRTC para la llamada {call_id} completado y activo.")
+                    # La oferta que el navegador usó para crear su respuesta es la descripción local de whatsapp_pc
+                    await browser_pc.setRemoteDescription(whatsapp_pc.localDescription)
+                    
+                    # Establecer la respuesta del navegador como la descripción local del PC del navegador
+                    browser_answer_sdp = RTCSessionDescription(sdp=data["sdp"], type="answer")
+                    await browser_pc.setLocalDescription(browser_answer_sdp)
+                    
+                    # Ahora que ambas conexiones están listas, enviamos la respuesta a WhatsApp
+                    await send_call_action(call_id, "pre_accept", whatsapp_pc.localDescription.sdp)
+                    await asyncio.sleep(1)
+                    await send_call_action(call_id, "accept", whatsapp_pc.localDescription.sdp)
+                    
+                    session["status"] = "active"
+                    logging.info(f"Puente WebRTC para la llamada {call_id} completado y activo.")
 
             elif event_type == "hangup_from_browser":
                 logging.info(f"Agente colgó la llamada {call_id} desde el navegador.")
