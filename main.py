@@ -272,6 +272,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 elif event_type == "hangup_from_browser":
                     if call_id in active_calls:
                         await send_call_action(call_id, "terminate")
+                elif event_type == "reject_call":
+                    logging.info(f"Agente ha rechazado la llamada {call_id} desde el navegador.")
+                    if call_id in active_calls:
+                        await send_call_action(call_id, "reject")
+                        # No es necesario limpiar la sesión aquí, el webhook 'terminate' lo hará.        
             
             except Exception as e:
                 logging.error(f"Error CRÍTICO dentro del bucle del WebSocket: {e}", exc_info=True)

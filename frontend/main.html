@@ -6,55 +6,88 @@
     <title>Panel de Agente - Llamadas de WhatsApp</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f2f5; color: #1c1e21; }
-        .container { background-color: #fff; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); text-align: center; width: 90%; max-width: 400px; }
+        .container { background-color: #fff; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); text-align: center; width: 90%; max-width: 400px; transition: all 0.3s ease; }
         h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
-        #status { font-size: 1rem; margin-bottom: 1.5rem; padding: 0.5rem; border-radius: 4px; }
+        #status { font-size: 1rem; margin-bottom: 1.5rem; padding: 0.5rem; border-radius: 4px; transition: all 0.3s ease; }
         .status-connecting { color: #f5a623; background-color: #fffbe6; }
         .status-connected { color: #2e7d32; background-color: #e8f5e9; }
         .status-disconnected { color: #d32f2f; background-color: #ffebee; }
         .call-controls button { padding: 0.8rem 1.5rem; font-size: 1rem; border: none; border-radius: 6px; cursor: pointer; margin: 0 0.5rem; transition: background-color 0.2s; }
         .answer-btn { background-color: #42b72a; color: white; }
         .answer-btn:hover { background-color: #36a420; }
-        .hangup-btn { background-color: #fa383e; color: white; }
-        .hangup-btn:hover { background-color: #e02c32; }
-        #incoming-call-alert, #in-call-view { display: none; }
-        #caller-info { font-weight: bold; margin-bottom: 1rem; }
-        audio { margin-top: 1rem; width: 100%; }
+        .reject-btn, .hangup-btn { background-color: #fa383e; color: white; }
+        .reject-btn:hover, .hangup-btn:hover { background-color: #e02c32; }
+        .mute-btn { background-color: #606770; color: white; }
+        .mute-btn.muted { background-color: #31a24c; }
+        .view { display: none; }
+        #caller-info, #call-timer { font-weight: bold; margin-bottom: 1rem; font-size: 1.2rem; }
+        audio { margin-top: 1rem; width: 100%; display: none; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Panel de Llamadas</h1>
         <p id="status" class="status-connecting">Estado: Conectando al servidor...</p>
-        <div id="incoming-call-alert">
+
+        <div id="idle-view" class="view">
+            <p>Esperando llamadas...</p>
+        </div>
+
+        <div id="ringing-view" class="view">
             <p id="caller-info">Llamada entrante...</p>
             <div class="call-controls">
                 <button id="answer-button" class="answer-btn">Contestar</button>
+                <button id="reject-button" class="reject-btn">Rechazar</button>
             </div>
         </div>
-        <div id="in-call-view">
-            <p>Llamada en curso...</p>
+
+        <div id="active-call-view" class="view">
+            <p id="call-timer">00:00</p>
             <audio id="remote-audio" autoplay playsinline></audio>
             <div class="call-controls">
+                <button id="mute-button" class="mute-btn">Silenciar</button>
                 <button id="hangup-button" class="hangup-btn">Colgar</button>
             </div>
         </div>
     </div>
 
     <script>
+        // --- State Management ---
         let ws;
         let browser_pc;
         let localStream;
         let currentCallId = null;
+        let timerInterval = null;
+        let appState = 'IDLE'; // IDLE, RINGING, CONNECTING, ACTIVE
 
+        // --- DOM Elements ---
         const statusEl = document.getElementById('status');
-        const incomingCallAlertEl = document.getElementById('incoming-call-alert');
-        const inCallViewEl = document.getElementById('in-call-view');
+        const idleView = document.getElementById('idle-view');
+        const ringingView = document.getElementById('ringing-view');
+        const activeCallView = document.getElementById('active-call-view');
         const callerInfoEl = document.getElementById('caller-info');
+        const callTimerEl = document.getElementById('call-timer');
         const answerButton = document.getElementById('answer-button');
+        const rejectButton = document.getElementById('reject-button');
         const hangupButton = document.getElementById('hangup-button');
+        const muteButton = document.getElementById('mute-button');
         const remoteAudioEl = document.getElementById('remote-audio');
 
+        // --- UI Management ---
+        function updateUI(newState) {
+            appState = newState;
+            console.log(`Cambiando estado a: ${appState}`);
+            
+            idleView.style.display = (appState === 'IDLE') ? 'block' : 'none';
+            ringingView.style.display = (appState === 'RINGING') ? 'block' : 'none';
+            activeCallView.style.display = (appState === 'ACTIVE' || appState === 'CONNECTING') ? 'block' : 'none';
+
+            if (appState === 'CONNECTING') {
+                callTimerEl.textContent = 'Conectando...';
+            }
+        }
+
+        // --- WebSocket Logic ---
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host;
@@ -64,9 +97,10 @@
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
-                console.log("Conectado al lobby de llamadas.");
+                console.log("Conectado al lobby.");
                 statusEl.textContent = 'Estado: Listo para recibir llamadas';
                 statusEl.className = 'status-connected';
+                updateUI('IDLE');
             };
 
             ws.onmessage = (event) => {
@@ -76,35 +110,40 @@
                 switch (data.type) {
                     case 'incoming_call': handleIncomingCall(data); break;
                     case 'offer_from_server': handleOfferFromServer(data); break;
-                    case 'call_terminated': console.log("El servidor informa que la llamada ha terminado."); resetUI(); break;
+                    case 'call_terminated': console.log("Llamada terminada por el servidor."); reset(); break;
                 }
             };
 
-            ws.onerror = (error) => {
-                console.error("Error de WebSocket:", error);
-                statusEl.textContent = 'Error: Conexión perdida con el servidor.';
-                statusEl.className = 'status-disconnected';
-            };
-
+            ws.onerror = (error) => console.error("Error de WebSocket:", error);
             ws.onclose = () => {
-                console.warn("Conexión WebSocket cerrada. Intentando reconectar en 5 segundos...");
+                console.warn("Conexión WebSocket cerrada. Reconectando...");
                 statusEl.textContent = 'Estado: Desconectado. Reconectando...';
                 statusEl.className = 'status-disconnected';
                 setTimeout(connectWebSocket, 5000);
             };
         }
 
+        // --- Call Handling Logic ---
         function handleIncomingCall(data) {
-            if (currentCallId) return;
+            if (appState !== 'IDLE') return;
             currentCallId = data.call_id;
             callerInfoEl.textContent = `Llamada entrante de: ${data.from}`;
-            incomingCallAlertEl.style.display = 'block';
+            updateUI('RINGING');
         }
 
         async function handleOfferFromServer(data) {
-            console.log("Recibida oferta SDP del servidor, iniciando WebRTC.");
-            
+            updateUI('CONNECTING');
             browser_pc = new RTCPeerConnection();
+
+            browser_pc.oniceconnectionstatechange = () => {
+                console.log(`Estado de conexión ICE: ${browser_pc.iceConnectionState}`);
+                if (browser_pc.iceConnectionState === 'connected' || browser_pc.iceConnectionState === 'completed') {
+                    updateUI('ACTIVE');
+                    startTimer();
+                } else if (browser_pc.iceConnectionState === 'failed' || browser_pc.iceConnectionState === 'disconnected') {
+                    reset();
+                }
+            };
 
             browser_pc.ontrack = (event) => {
                 console.log("Recibida pista de audio remota.");
@@ -114,71 +153,96 @@
             };
 
             try {
-                // --- INICIO DE LA MODIFICACIÓN FINAL ---
-                // 1. Pedir acceso al micrófono ANTES de negociar.
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-                
-                // 2. Añadir las pistas del micrófono a la conexión para que se envíen.
-                localStream.getTracks().forEach(track => {
-                    console.log("Añadiendo pista de audio local (micrófono) a la conexión.");
-                    browser_pc.addTrack(track, localStream);
-                });
-                // --- FIN DE LA MODIFICACIÓN FINAL ---
+                localStream.getTracks().forEach(track => browser_pc.addTrack(track, localStream));
 
                 await browser_pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
                 const answer = await browser_pc.createAnswer();
                 await browser_pc.setLocalDescription(answer);
 
-                console.log("Enviando respuesta SDP del navegador al servidor.");
                 ws.send(JSON.stringify({
                     type: 'answer_from_browser',
                     call_id: currentCallId,
                     sdp: browser_pc.localDescription.sdp
                 }));
-
-                inCallViewEl.style.display = 'block';
-
             } catch (error) {
                 console.error("Error durante la negociación WebRTC:", error);
-                resetUI();
+                if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+                    alert("Necesitas permitir el acceso al micrófono para contestar llamadas.");
+                }
+                reset();
             }
         }
 
         function answerCall() {
             if (currentCallId && ws.readyState === WebSocket.OPEN) {
-                console.log(`Enviando solicitud para contestar la llamada: ${currentCallId}`);
                 ws.send(JSON.stringify({ type: 'answer_call', call_id: currentCallId }));
-                incomingCallAlertEl.style.display = 'none';
+                updateUI('CONNECTING');
             }
+        }
+
+        function rejectCall() {
+            if (currentCallId && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'reject_call', call_id: currentCallId }));
+            }
+            reset();
         }
 
         function hangup() {
             if (currentCallId && ws.readyState === WebSocket.OPEN) {
-                console.log(`Enviando solicitud para colgar la llamada: ${currentCallId}`);
                 ws.send(JSON.stringify({ type: 'hangup_from_browser', call_id: currentCallId }));
             }
-            resetUI();
+            reset();
         }
 
-        function resetUI() {
-            console.log("Reseteando la interfaz de usuario.");
-            if (browser_pc) {
-                browser_pc.close();
-                browser_pc = null;
+        function toggleMute() {
+            if (!localStream) return;
+            localStream.getAudioTracks().forEach(track => {
+                track.enabled = !track.enabled;
+                muteButton.textContent = track.enabled ? 'Silenciar' : 'Reactivar';
+                muteButton.classList.toggle('muted', !track.enabled);
+            });
+        }
+
+        function startTimer() {
+            let startTime = Date.now();
+            stopTimer(); // Asegurarse de que no haya timers corriendo
+            timerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                const minutes = String(Math.floor(elapsed / 60)).padStart(2, '0');
+                const seconds = String(elapsed % 60).padStart(2, '0');
+                callTimerEl.textContent = `${minutes}:${seconds}`;
+            }, 1000);
+        }
+
+        function stopTimer() {
+            if (timerInterval) {
+                clearInterval(timerInterval);
+                timerInterval = null;
             }
-            if (localStream) {
-                localStream.getTracks().forEach(track => track.stop());
-                localStream = null;
-            }
+        }
+
+        function reset() {
+            console.log("Reseteando estado de la llamada.");
+            stopTimer();
+            if (browser_pc) { browser_pc.close(); browser_pc = null; }
+            if (localStream) { localStream.getTracks().forEach(track => track.stop()); localStream = null; }
+            
             remoteAudioEl.srcObject = null;
             currentCallId = null;
-            incomingCallAlertEl.style.display = 'none';
-            inCallViewEl.style.display = 'none';
+            muteButton.textContent = 'Silenciar';
+            muteButton.classList.remove('muted');
+            
+            updateUI('IDLE');
         }
 
+        // --- Event Listeners ---
         answerButton.addEventListener('click', answerCall);
+        rejectButton.addEventListener('click', rejectCall);
         hangupButton.addEventListener('click', hangup);
+        muteButton.addEventListener('click', toggleMute);
 
+        // --- Init ---
         connectWebSocket();
     </script>
 </body>
