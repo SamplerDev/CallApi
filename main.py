@@ -163,7 +163,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     session["status"] = "negotiating"
                     session["agent_websocket"] = websocket
 
-                    ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:193_02"), RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL)]
+                    ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:19302"), RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL)]
                     config = RTCConfiguration(iceServers=ice_servers)
                     
                     # --- INICIO DE LA CORRECCIÓN DE FLUJO ---
