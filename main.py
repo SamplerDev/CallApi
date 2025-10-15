@@ -140,7 +140,9 @@ async def receive_call_notification(request: Request):
 
     return Response(status_code=200)
 
-@app.websocket("/ws") # Endpoint de WebSocket genérico, sin agent_id
+# En tu archivo main.py
+
+@app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     lobby_clients.add(websocket)
@@ -163,17 +165,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     session["status"] = "negotiating"
                     session["agent_websocket"] = websocket
 
-                    ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:19302"), RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL)]
+                    ice_servers = [
+                        RTCIceServer(urls="stun:stun.l.google.com:19302"), 
+                        RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
+                    ]
                     config = RTCConfiguration(iceServers=ice_servers)
                     
-                    # --- INICIO DE LA CORRECCIÓN DE FLUJO ---
-                    # 1. Creamos AMBAS conexiones (para WhatsApp y para el Navegador) al mismo tiempo.
                     whatsapp_pc = RTCPeerConnection(configuration=config)
                     browser_pc = RTCPeerConnection(configuration=config)
                     session["whatsapp_pc"] = whatsapp_pc
                     session["browser_pc"] = browser_pc
 
-                    # 2. Configuramos el "puenteo" de audio entre ellas.
                     @whatsapp_pc.on("track")
                     async def on_whatsapp_track(track):
                         logging.info(f"Recibida pista de WhatsApp para {call_id}, reenviando al navegador.")
@@ -184,22 +186,22 @@ async def websocket_endpoint(websocket: WebSocket):
                         logging.info(f"Recibida pista del navegador para {call_id}, reenviando a WhatsApp.")
                         whatsapp_pc.addTrack(track)
 
-                    # 3. Procesamos la oferta de WhatsApp.
                     whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                     await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
                     
-                    # 4. Creamos una NUEVA oferta para el navegador.
-                    # Esto es crucial. El navegador necesita su propia oferta.
+                    # --- INICIO DE LA CORRECCIÓN FINAL ---
+                    # Antes de crear la oferta, debemos decirle a browser_pc qué negociar.
+                    browser_pc.addTransceiver("audio", direction="sendrecv")
+                    # --- FIN DE LA CORRECCIÓN FINAL ---
+
                     browser_offer = await browser_pc.createOffer()
                     await browser_pc.setLocalDescription(browser_offer)
                     
-                    # 5. Enviamos la oferta al navegador.
                     await websocket.send_json({
                         "type": "offer_from_server",
                         "call_id": call_id,
                         "sdp": browser_pc.localDescription.sdp
                     })
-                    # --- FIN DE LA CORRECCIÓN DE FLUJO ---
 
                 elif event_type == "answer_from_browser":
                     logging.info(f"Recibida RESPUESTA SDP del navegador para la llamada {call_id}")
@@ -207,18 +209,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     whatsapp_pc = session["whatsapp_pc"]
                     browser_pc = session["browser_pc"]
 
-                    # --- INICIO DE LA CORRECCIÓN DE FLUJO (PARTE 2) ---
-                    # 1. Establecemos la respuesta del navegador en su conexión.
                     browser_answer = RTCSessionDescription(sdp=data["sdp"], type="answer")
                     await browser_pc.setRemoteDescription(browser_answer)
 
-                    # 2. Ahora que el navegador está listo, generamos la respuesta para WhatsApp.
                     whatsapp_answer = await whatsapp_pc.createAnswer()
                     await whatsapp_pc.setLocalDescription(whatsapp_answer)
-                    # --- FIN DE LA CORRECCIÓN DE FLUJO (PARTE 2) ---
 
-                    # --- LÓGICA GANADORA: CONSTRUCCIÓN MANUAL DEL SDP ---
-                    # (Esta parte se mantiene igual, ya que es la receta correcta)
+                    # (El resto del código de construcción manual del SDP se mantiene igual)
                     local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                     ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                     ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
