@@ -5,82 +5,33 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Panel de Agente - Llamadas de WhatsApp</title>
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-            background-color: #f0f2f5;
-            color: #1c1e21;
-        }
-        .container {
-            background-color: #fff;
-            padding: 2rem;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-            text-align: center;
-            width: 90%;
-            max-width: 400px;
-        }
-        h1 {
-            font-size: 1.5rem;
-            margin-bottom: 0.5rem;
-        }
-        #status {
-            font-size: 1rem;
-            margin-bottom: 1.5rem;
-            padding: 0.5rem;
-            border-radius: 4px;
-        }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f2f5; color: #1c1e21; }
+        .container { background-color: #fff; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); text-align: center; width: 90%; max-width: 400px; }
+        h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+        #status { font-size: 1rem; margin-bottom: 1.5rem; padding: 0.5rem; border-radius: 4px; }
         .status-connecting { color: #f5a623; background-color: #fffbe6; }
         .status-connected { color: #2e7d32; background-color: #e8f5e9; }
         .status-disconnected { color: #d32f2f; background-color: #ffebee; }
-        .call-controls button {
-            padding: 0.8rem 1.5rem;
-            font-size: 1rem;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            margin: 0 0.5rem;
-            transition: background-color 0.2s;
-        }
+        .call-controls button { padding: 0.8rem 1.5rem; font-size: 1rem; border: none; border-radius: 6px; cursor: pointer; margin: 0 0.5rem; transition: background-color 0.2s; }
         .answer-btn { background-color: #42b72a; color: white; }
         .answer-btn:hover { background-color: #36a420; }
         .hangup-btn { background-color: #fa383e; color: white; }
         .hangup-btn:hover { background-color: #e02c32; }
-        #incoming-call-alert {
-            display: none;
-            margin-bottom: 1rem;
-        }
-        #in-call-view {
-            display: none;
-        }
-        #caller-info {
-            font-weight: bold;
-            margin-bottom: 1rem;
-        }
-        audio {
-            margin-top: 1rem;
-            width: 100%;
-        }
+        #incoming-call-alert, #in-call-view { display: none; }
+        #caller-info { font-weight: bold; margin-bottom: 1rem; }
+        audio { margin-top: 1rem; width: 100%; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Panel de Llamadas</h1>
         <p id="status" class="status-connecting">Estado: Conectando al servidor...</p>
-
-        <!-- Alerta de llamada entrante -->
         <div id="incoming-call-alert">
             <p id="caller-info">Llamada entrante...</p>
             <div class="call-controls">
                 <button id="answer-button" class="answer-btn">Contestar</button>
             </div>
         </div>
-
-        <!-- Vista durante la llamada -->
         <div id="in-call-view">
             <p>Llamada en curso...</p>
             <audio id="remote-audio" autoplay playsinline></audio>
@@ -91,12 +42,11 @@
     </div>
 
     <script>
-        // --- Variables Globales ---
         let ws;
         let browser_pc;
+        let localStream;
         let currentCallId = null;
 
-        // --- Elementos del DOM ---
         const statusEl = document.getElementById('status');
         const incomingCallAlertEl = document.getElementById('incoming-call-alert');
         const inCallViewEl = document.getElementById('in-call-view');
@@ -105,7 +55,6 @@
         const hangupButton = document.getElementById('hangup-button');
         const remoteAudioEl = document.getElementById('remote-audio');
 
-        // --- Lógica de WebSocket ---
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host;
@@ -125,16 +74,9 @@
                 console.log("Mensaje del servidor:", data);
 
                 switch (data.type) {
-                    case 'incoming_call':
-                        handleIncomingCall(data);
-                        break;
-                    case 'offer_from_server':
-                        handleOfferFromServer(data);
-                        break;
-                    case 'call_terminated':
-                        console.log("El servidor informa que la llamada ha terminado.");
-                        resetUI();
-                        break;
+                    case 'incoming_call': handleIncomingCall(data); break;
+                    case 'offer_from_server': handleOfferFromServer(data); break;
+                    case 'call_terminated': console.log("El servidor informa que la llamada ha terminado."); resetUI(); break;
                 }
             };
 
@@ -152,12 +94,8 @@
             };
         }
 
-        // --- Lógica de Manejo de Llamadas ---
         function handleIncomingCall(data) {
-            if (currentCallId) {
-                console.warn("Ya hay una llamada en curso o sonando, ignorando nueva llamada.");
-                return;
-            }
+            if (currentCallId) return;
             currentCallId = data.call_id;
             callerInfoEl.textContent = `Llamada entrante de: ${data.from}`;
             incomingCallAlertEl.style.display = 'block';
@@ -176,6 +114,17 @@
             };
 
             try {
+                // --- INICIO DE LA MODIFICACIÓN FINAL ---
+                // 1. Pedir acceso al micrófono ANTES de negociar.
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                
+                // 2. Añadir las pistas del micrófono a la conexión para que se envíen.
+                localStream.getTracks().forEach(track => {
+                    console.log("Añadiendo pista de audio local (micrófono) a la conexión.");
+                    browser_pc.addTrack(track, localStream);
+                });
+                // --- FIN DE LA MODIFICACIÓN FINAL ---
+
                 await browser_pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
                 const answer = await browser_pc.createAnswer();
                 await browser_pc.setLocalDescription(answer);
@@ -198,10 +147,7 @@
         function answerCall() {
             if (currentCallId && ws.readyState === WebSocket.OPEN) {
                 console.log(`Enviando solicitud para contestar la llamada: ${currentCallId}`);
-                ws.send(JSON.stringify({
-                    type: 'answer_call',
-                    call_id: currentCallId
-                }));
+                ws.send(JSON.stringify({ type: 'answer_call', call_id: currentCallId }));
                 incomingCallAlertEl.style.display = 'none';
             }
         }
@@ -209,10 +155,7 @@
         function hangup() {
             if (currentCallId && ws.readyState === WebSocket.OPEN) {
                 console.log(`Enviando solicitud para colgar la llamada: ${currentCallId}`);
-                ws.send(JSON.stringify({
-                    type: 'hangup_from_browser',
-                    call_id: currentCallId
-                }));
+                ws.send(JSON.stringify({ type: 'hangup_from_browser', call_id: currentCallId }));
             }
             resetUI();
         }
@@ -223,17 +166,19 @@
                 browser_pc.close();
                 browser_pc = null;
             }
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
             remoteAudioEl.srcObject = null;
             currentCallId = null;
             incomingCallAlertEl.style.display = 'none';
             inCallViewEl.style.display = 'none';
         }
 
-        // --- Event Listeners ---
         answerButton.addEventListener('click', answerCall);
         hangupButton.addEventListener('click', hangup);
 
-        // --- Iniciar la aplicación ---
         connectWebSocket();
     </script>
 </body>
