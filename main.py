@@ -203,7 +203,7 @@ async def websocket_endpoint(websocket: WebSocket, agent_id: str):
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
     try:
-        with open("main.html") as f: 
+        with open("frontend/main.html") as f:
             return HTMLResponse(content=f.read(), status_code=200)
     except FileNotFoundError:
         return HTMLResponse(content="<h1>Frontend no encontrado. Asegúrate de que el archivo 'main.html' está en la raíz del proyecto.</h1>", status_code=404)
