@@ -163,63 +163,62 @@ async def websocket_endpoint(websocket: WebSocket):
                     session["status"] = "negotiating"
                     session["agent_websocket"] = websocket
 
-                    ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:19302"), RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL)]
+                    ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:193_02"), RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL)]
                     config = RTCConfiguration(iceServers=ice_servers)
+                    
+                    # --- INICIO DE LA CORRECCIÓN DE FLUJO ---
+                    # 1. Creamos AMBAS conexiones (para WhatsApp y para el Navegador) al mismo tiempo.
                     whatsapp_pc = RTCPeerConnection(configuration=config)
+                    browser_pc = RTCPeerConnection(configuration=config)
                     session["whatsapp_pc"] = whatsapp_pc
-                    session["ice_servers"] = ice_servers # Guardamos la config para usarla después
+                    session["browser_pc"] = browser_pc
 
+                    # 2. Configuramos el "puenteo" de audio entre ellas.
                     @whatsapp_pc.on("track")
                     async def on_whatsapp_track(track):
-                        if call_id in active_calls and active_calls[call_id].get("browser_pc"):
-                            active_calls[call_id]["browser_pc"].addTrack(track)
-                        else:
-                            active_calls[call_id]["pending_whatsapp_tracks"].append(track)
+                        logging.info(f"Recibida pista de WhatsApp para {call_id}, reenviando al navegador.")
+                        browser_pc.addTrack(track)
 
-                    whatsapp_pc.addTransceiver("audio", direction="sendrecv")
+                    @browser_pc.on("track")
+                    async def on_browser_track(track):
+                        logging.info(f"Recibida pista del navegador para {call_id}, reenviando a WhatsApp.")
+                        whatsapp_pc.addTrack(track)
+
+                    # 3. Procesamos la oferta de WhatsApp.
                     whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                     await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
-                    answer = await whatsapp_pc.createAnswer()
-                    await whatsapp_pc.setLocalDescription(answer)
-
+                    
+                    # 4. Creamos una NUEVA oferta para el navegador.
+                    # Esto es crucial. El navegador necesita su propia oferta.
+                    browser_offer = await browser_pc.createOffer()
+                    await browser_pc.setLocalDescription(browser_offer)
+                    
+                    # 5. Enviamos la oferta al navegador.
                     await websocket.send_json({
                         "type": "offer_from_server",
                         "call_id": call_id,
-                        "sdp": whatsapp_pc.localDescription.sdp
+                        "sdp": browser_pc.localDescription.sdp
                     })
+                    # --- FIN DE LA CORRECCIÓN DE FLUJO ---
 
                 elif event_type == "answer_from_browser":
                     logging.info(f"Recibida RESPUESTA SDP del navegador para la llamada {call_id}")
                     
                     whatsapp_pc = session["whatsapp_pc"]
-                    
-                    # --- INICIO DE LA CORRECCIÓN ---
-                    # Reutilizamos la configuración de ICE que guardamos antes.
-                    ice_servers_config = session.get("ice_servers")
-                    if not ice_servers_config:
-                        logging.error("No se encontró la configuración ICE en la sesión. Abortando.")
-                        continue
-                    
-                    config = RTCConfiguration(iceServers=ice_servers_config)
-                    browser_pc = RTCPeerConnection(configuration=config)
-                    # --- FIN DE LA CORRECCIÓN ---
+                    browser_pc = session["browser_pc"]
 
-                    session["browser_pc"] = browser_pc
+                    # --- INICIO DE LA CORRECCIÓN DE FLUJO (PARTE 2) ---
+                    # 1. Establecemos la respuesta del navegador en su conexión.
+                    browser_answer = RTCSessionDescription(sdp=data["sdp"], type="answer")
+                    await browser_pc.setRemoteDescription(browser_answer)
 
-                    @browser_pc.on("track")
-                    async def on_browser_track(track):
-                        if whatsapp_pc and whatsapp_pc.connectionState != "closed":
-                            whatsapp_pc.addTrack(track)
-
-                    await browser_pc.setRemoteDescription(whatsapp_pc.localDescription)
-                    browser_answer_sdp = RTCSessionDescription(sdp=data["sdp"], type="answer")
-                    await browser_pc.setLocalDescription(browser_answer_sdp)
-                    
-                    for track in session.get("pending_whatsapp_tracks", []):
-                        browser_pc.addTrack(track)
-                    session["pending_whatsapp_tracks"] = []
+                    # 2. Ahora que el navegador está listo, generamos la respuesta para WhatsApp.
+                    whatsapp_answer = await whatsapp_pc.createAnswer()
+                    await whatsapp_pc.setLocalDescription(whatsapp_answer)
+                    # --- FIN DE LA CORRECCIÓN DE FLUJO (PARTE 2) ---
 
                     # --- LÓGICA GANADORA: CONSTRUCCIÓN MANUAL DEL SDP ---
+                    # (Esta parte se mantiene igual, ya que es la receta correcta)
                     local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                     ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                     ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
@@ -252,7 +251,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "a=setup:active\r\n"
                         "a=mid:audio\r\n"
                         "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
-                        "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\r\n"
+                        "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext:abs-send-time\r\n"
                         "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
                         "a=sendrecv\r\n"
                         "a=rtcp-mux\r\n"
