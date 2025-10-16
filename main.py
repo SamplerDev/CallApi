@@ -219,7 +219,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Imprimimos el SDP completo que aiortc ha generado.
                     # Esto nos mostrará la estructura exacta con la que debemos trabajar.
                     logging.info("--- SDP COMPLETO GENERADO POR AIORTC (PARA DEPURACIÓN) ---")
-                    logging.info(whatsapp_pc.replace('\r\n', '\n'))
+                    logging.info(whatsapp_pc.localDescription.sdp.replace('\r\n', '\n'))
                     logging.info("----------------------------------------------------------")
                     # --- FIN DEL LOG DE DEPURACIÓN ---
 
