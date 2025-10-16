@@ -228,7 +228,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                     ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
                     fingerprint = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=fingerprint:")), None)
-                    
+                    direction_line = next((line for line in local_sdp_lines if line in ["a=sendrecv", "a=recvonly", "a=sendonly", "a=inactive"]), "a=sendrecv")
+                    direction = direction_line.split(':')[1] if ':' in direction_line else direction_line
                     # --- LÓGICA DE EXTRACCIÓN CORREGIDA BASADA EN EL LOG REAL ---
                     ssrc = None
                     cname = None
@@ -275,7 +276,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
                         "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext:abs-send-time\r\n"
                         "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
-                        "a=sendrecv\r\n"
+                        f"{direction}\r\n"
                         "a=rtcp-mux\r\n"
                         "a=rtpmap:111 opus/48000/2\r\n"
                         "a=rtcp-fb:111 transport-cc\r\n"
