@@ -215,51 +215,54 @@ async def websocket_endpoint(websocket: WebSocket):
                     whatsapp_answer = await whatsapp_pc.createAnswer()
                     await whatsapp_pc.setLocalDescription(whatsapp_answer)
 
-                    # (El resto del código de construcción manual del SDP se mantiene igual)
-                    local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
-                    ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
-                    ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
-                    fingerprint = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=fingerprint:")), None)
-                    ssrc_line = next((line for line in local_sdp_lines if line.startswith("a=ssrc:") and "cname:" in line), None)
-                    ssrc = ssrc_line.split(' ')[0].split(':')[1] if ssrc_line else None
-                    cname = ssrc_line.split('cname:')[1] if ssrc_line else None
+                    # # (El resto del código de construcción manual del SDP se mantiene igual)
+                    # local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
+                    # ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
+                    # ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
+                    # fingerprint = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=fingerprint:")), None)
+                    # ssrc_line = next((line for line in local_sdp_lines if line.startswith("a=ssrc:") and "cname:" in line), None)
+                    # ssrc = ssrc_line.split(' ')[0].split(':')[1] if ssrc_line else None
+                    # cname = ssrc_line.split('cname:')[1] if ssrc_line else None
 
-                    if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname]):
-                        logging.error("Fallo al extraer piezas para el SDP final. Abortando.")
-                        continue
+                    # if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname]):
+                    #     logging.error("Fallo al extraer piezas para el SDP final. Abortando.")
+                    #     continue
 
-                    session_id = int(time.time() * 1000)
-                    session_uuid = str(uuid.uuid4())
-                    track_id = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
+                    # session_id = int(time.time() * 1000)
+                    # session_uuid = str(uuid.uuid4())
+                    # track_id = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
 
-                    final_sdp = (
-                        "v=0\r\n"
-                        f"o=- {session_id} 2 IN IP4 127.0.0.1\r\n"
-                        "s=-\r\n"
-                        "t=0 0\r\n"
-                        "a=group:BUNDLE audio\r\n"
-                        f"a=msid-semantic: WMS {session_uuid}\r\n"
-                        "m=audio 9 UDP/TLS/RTP/SAVPF 111 126\r\n"
-                        "c=IN IP4 0.0.0.0\r\n"
-                        "a=rtcp:9 IN IP4 0.0.0.0\r\n"
-                        f"a=ice-ufrag:{ice_ufrag}\r\n"
-                        f"a=ice-pwd:{ice_pwd}\r\n"
-                        f"a=fingerprint:{fingerprint}\r\n"
-                        "a=setup:active\r\n"
-                        "a=mid:audio\r\n"
-                        "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
-                        "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext:abs-send-time\r\n"
-                        "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
-                        "a=sendrecv\r\n"
-                        "a=rtcp-mux\r\n"
-                        "a=rtpmap:111 opus/48000/2\r\n"
-                        "a=rtcp-fb:111 transport-cc\r\n"
-                        "a=fmtp:111 minptime=10;useinbandfec=1\r\n"
-                        "a=rtpmap:126 telephone-event/8000\r\n"
-                        f"a=ssrc:{ssrc} cname:{cname}\r\n"
-                        f"a=ssrc:{ssrc} msid:{session_uuid} {track_id}\r\n"
-                    )
+                    # final_sdp = (
+                    #     "v=0\r\n"
+                    #     f"o=- {session_id} 2 IN IP4 127.0.0.1\r\n"
+                    #     "s=-\r\n"
+                    #     "t=0 0\r\n"
+                    #     "a=group:BUNDLE audio\r\n"
+                    #     f"a=msid-semantic: WMS {session_uuid}\r\n"
+                    #     "m=audio 9 UDP/TLS/RTP/SAVPF 111 126\r\n"
+                    #     "c=IN IP4 0.0.0.0\r\n"
+                    #     "a=rtcp:9 IN IP4 0.0.0.0\r\n"
+                    #     f"a=ice-ufrag:{ice_ufrag}\r\n"
+                    #     f"a=ice-pwd:{ice_pwd}\r\n"
+                    #     f"a=fingerprint:{fingerprint}\r\n"
+                    #     "a=setup:active\r\n"
+                    #     "a=mid:audio\r\n"
+                    #     "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
+                    #     "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext:abs-send-time\r\n"
+                    #     "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
+                    #     "a=sendrecv\r\n"
+                    #     "a=rtcp-mux\r\n"
+                    #     "a=rtpmap:111 opus/48000/2\r\n"
+                    #     "a=rtcp-fb:111 transport-cc\r\n"
+                    #     "a=fmtp:111 minptime=10;useinbandfec=1\r\n"
+                    #     "a=rtpmap:126 telephone-event/8000\r\n"
+                    #     f"a=ssrc:{ssrc} cname:{cname}\r\n"
+                    #     f"a=ssrc:{ssrc} msid:{session_uuid} {track_id}\r\n"
+                    # )
                     
+                    final_sdp = whatsapp_pc.localDescription.sdp
+
+
                     pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
                     if pre_accept_response:
                         await asyncio.sleep(1)
