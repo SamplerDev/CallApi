@@ -216,14 +216,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     await whatsapp_pc.setLocalDescription(whatsapp_answer)
 
                     # --- INICIO DEL LOG DE DEPURACIÓN ---
-                    # Imprimimos el SDP completo que aiortc ha generado.
-                    # Esto nos mostrará la estructura exacta con la que debemos trabajar.
                     logging.info("--- SDP COMPLETO GENERADO POR AIORTC (PARA DEPURACIÓN) ---")
                     logging.info(whatsapp_pc.localDescription.sdp.replace('\r\n', '\n'))
                     logging.info("----------------------------------------------------------")
                     # --- FIN DEL LOG DE DEPURACIÓN ---
 
-                    # --- INICIO DE LA CONSTRUCCIÓN MANUAL (VERSIÓN ROBUSTA) ---
+                    # --- INICIO DE LA CONSTRUCCIÓN MANUAL (VERSIÓN FINAL) ---
                     
                     local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                     
@@ -231,29 +229,26 @@ async def websocket_endpoint(websocket: WebSocket):
                     ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
                     fingerprint = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=fingerprint:")), None)
                     
-                    # --- LÓGICA DE EXTRACCIÓN MEJORADA ---
+                    # --- LÓGICA DE EXTRACCIÓN CORREGIDA BASADA EN EL LOG REAL ---
                     ssrc = None
                     cname = None
                     msid = None
                     track_id = None
 
-                    # 1. Encontrar la primera línea SSRC que tenga un CNAME para identificar el stream principal.
+                    # 1. Buscar la línea SSRC y CNAME
                     cname_line = next((line for line in local_sdp_lines if line.startswith("a=ssrc:") and "cname:" in line), None)
                     if cname_line:
                         parts = cname_line.split()
                         ssrc = parts[0].split(':')[1]
                         cname = parts[1].split('cname:')[1]
 
-                    # 2. Si encontramos un SSRC, ahora buscamos su línea MSID correspondiente.
-                    if ssrc:
-                        msid_line = next((line for line in local_sdp_lines if line.startswith(f"a=ssrc:{ssrc}") and "msid:" in line), None)
-                        if msid_line:
-                            parts = msid_line.split()
-                            # Asegurarse de que el índice sea correcto
-                            if len(parts) >= 4:
-                                msid = parts[2]
-                                track_id = parts[3]
-                    # --- FIN DE LÓGICA DE EXTRACCIÓN MEJORADA ---
+                    # 2. Buscar la línea MSID por separado
+                    msid_line = next((line for line in local_sdp_lines if line.startswith("a=msid:")), None)
+                    if msid_line:
+                        parts = msid_line.split()
+                        msid = parts[0].split(':')[1]
+                        track_id = parts[1]
+                    # --- FIN DE LÓGICA DE EXTRACCIÓN CORREGIDA ---
 
                     if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname, msid, track_id]):
                         logging.error("Fallo al extraer una o más piezas críticas del SDP de aiortc. Abortando.")
@@ -290,7 +285,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         f"a=ssrc:{ssrc} msid:{msid} {track_id}\r\n"
                     )
                     
-                    logging.info("--- SDP FINAL CONSTRUIDO (EXTRACCIÓN ROBUSTA) ---")
+                    logging.info("--- SDP FINAL CONSTRUIDO (EXTRACCIÓN FINAL) ---")
                     logging.info(final_sdp.replace('\r\n', '\n'))
                     logging.info("----------------------------------------------------")
                     
