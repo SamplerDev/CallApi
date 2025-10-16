@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Panel de Agente - Llamadas de WhatsApp</title>
+    <title>Panel de Agente - Llamadas de WhatsApp (DEBUG)</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f2f5; color: #1c1e21; }
         .container { background-color: #fff; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); text-align: center; width: 90%; max-width: 400px; }
@@ -24,7 +24,7 @@
 </head>
 <body>
     <div class="container">
-        <h1>Panel de Llamadas</h1>
+        <h1>Panel de Llamadas (Modo Depuración)</h1>
         <p id="status" class="status-connecting">Estado: Conectando al servidor...</p>
         <div id="incoming-call-alert">
             <p id="caller-info">Llamada entrante...</p>
@@ -42,6 +42,9 @@
     </div>
 
     <script>
+        // Abre la consola de desarrollador (F12) para ver los logs.
+        console.log("--- INICIANDO PANEL DE AGENTE ---");
+
         let ws;
         let browser_pc;
         let localStream;
@@ -60,34 +63,37 @@
             const host = window.location.host;
             const wsUrl = `${protocol}//${host}/ws`;
 
-            console.log(`Conectando al lobby en: ${wsUrl}`);
+            console.log(`[WEBSOCKET] Intentando conectar a: ${wsUrl}`);
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
-                console.log("Conectado al lobby de llamadas.");
+                console.info("[WEBSOCKET] Conexión establecida con éxito.");
                 statusEl.textContent = 'Estado: Listo para recibir llamadas';
                 statusEl.className = 'status-connected';
             };
 
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
-                console.log("Mensaje del servidor:", data);
+                console.info("[WEBSOCKET] Mensaje del servidor:", data);
 
                 switch (data.type) {
                     case 'incoming_call': handleIncomingCall(data); break;
                     case 'offer_from_server': handleOfferFromServer(data); break;
-                    case 'call_terminated': console.log("El servidor informa que la llamada ha terminado."); resetUI(); break;
+                    case 'call_terminated': 
+                        console.warn("[CALL] El servidor informa que la llamada ha terminado."); 
+                        resetUI(); 
+                        break;
                 }
             };
 
             ws.onerror = (error) => {
-                console.error("Error de WebSocket:", error);
+                console.error("[WEBSOCKET] Error de WebSocket:", error);
                 statusEl.textContent = 'Error: Conexión perdida con el servidor.';
                 statusEl.className = 'status-disconnected';
             };
 
-            ws.onclose = () => {
-                console.warn("Conexión WebSocket cerrada. Intentando reconectar en 5 segundos...");
+            ws.onclose = (event) => {
+                console.error(`[WEBSOCKET] Conexión cerrada. Código: ${event.code}, Razón: ${event.reason}`);
                 statusEl.textContent = 'Estado: Desconectado. Reconectando...';
                 statusEl.className = 'status-disconnected';
                 setTimeout(connectWebSocket, 5000);
@@ -95,74 +101,115 @@
         }
 
         function handleIncomingCall(data) {
-            if (currentCallId) return;
+            console.info('[CALL] Manejando llamada entrante:', data);
+            if (currentCallId) {
+                console.warn("[CALL] Ya hay una llamada en curso o sonando. Ignorando nueva llamada.");
+                return;
+            }
             currentCallId = data.call_id;
             callerInfoEl.textContent = `Llamada entrante de: ${data.from}`;
             incomingCallAlertEl.style.display = 'block';
+            console.log("[UI] Mostrando alerta de llamada entrante.");
         }
 
         async function handleOfferFromServer(data) {
-            console.log("Recibida oferta SDP del servidor, iniciando WebRTC.");
+            console.info("[WEBRTC] Recibida oferta del servidor. Creando PeerConnection.", data);
             
             browser_pc = new RTCPeerConnection();
+            console.log("[WEBRTC] Objeto RTCPeerConnection creado:", browser_pc);
 
+            // --- LOGS DE EVENTOS DE WEBRTC ---
+            browser_pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    console.log('[WEBRTC] Nuevo candidato ICE encontrado:', event.candidate);
+                } else {
+                    console.log('[WEBRTC] Todos los candidatos ICE han sido recolectados.');
+                }
+            };
+            browser_pc.oniceconnectionstatechange = () => {
+                console.warn(`[WEBRTC] Estado de conexión ICE cambiado a: ${browser_pc.iceConnectionState}`);
+            };
+            browser_pc.onconnectionstatechange = () => {
+                console.warn(`[WEBRTC] Estado de la conexión Peer cambiado a: ${browser_pc.connectionState}`);
+            };
+            browser_pc.onsignalingstatechange = () => {
+                console.log(`[WEBRTC] Estado de señalización cambiado a: ${browser_pc.signalingState}`);
+            };
             browser_pc.ontrack = (event) => {
-                console.log("Recibida pista de audio remota.");
+                console.info("[WEBRTC] ¡Pista de audio remota recibida!", event);
                 if (remoteAudioEl.srcObject !== event.streams[0]) {
                     remoteAudioEl.srcObject = event.streams[0];
+                    console.log("[MEDIA] Asignado stream remoto al elemento <audio>.");
                     
-                    // Forzamos la reproducción para evitar bloqueos de autoplay del navegador.
                     remoteAudioEl.play().catch(error => {
-                        console.error("Error al intentar reproducir el audio automáticamente:", error);
+                        console.error("[MEDIA] Error al intentar reproducir el audio automáticamente:", error);
                     });
                 }
             };
+            // --- FIN DE LOGS DE EVENTOS ---
 
             try {
+                console.log('[MEDIA] Solicitando acceso al micrófono...');
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                console.info('[MEDIA] Acceso al micrófono concedido. Stream:', localStream);
                 
                 localStream.getTracks().forEach(track => {
-                    console.log("Añadiendo pista de audio local (micrófono) a la conexión.");
+                    console.log("[MEDIA] Añadiendo pista de audio local (micrófono) a la conexión:", track);
                     browser_pc.addTrack(track, localStream);
                 });
 
+                console.log("[WEBRTC] Estableciendo descripción remota (oferta del servidor)...");
                 await browser_pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
-                const answer = await browser_pc.createAnswer();
-                await browser_pc.setLocalDescription(answer);
+                console.log("[WEBRTC] Descripción remota establecida con éxito.");
 
-                console.log("Enviando respuesta SDP del navegador al servidor.");
-                ws.send(JSON.stringify({
+                console.log("[WEBRTC] Creando respuesta (answer)...");
+                const answer = await browser_pc.createAnswer();
+                console.info("[WEBRTC] Respuesta creada:", answer);
+
+                console.log("[WEBRTC] Estableciendo descripción local (nuestra respuesta)...");
+                await browser_pc.setLocalDescription(answer);
+                console.log("[WEBRTC] Descripción local establecida con éxito.");
+
+                const payload = {
                     type: 'answer_from_browser',
                     call_id: currentCallId,
                     sdp: browser_pc.localDescription.sdp
-                }));
+                };
+                console.info("[WEBSOCKET] Enviando respuesta SDP del navegador al servidor:", payload);
+                ws.send(JSON.stringify(payload));
 
                 inCallViewEl.style.display = 'block';
+                console.log("[UI] Mostrando la vista de llamada en curso.");
 
             } catch (error) {
-                console.error("Error durante la negociación WebRTC:", error);
+                console.error("[WEBRTC] Error CRÍTICO durante la negociación WebRTC:", error);
                 resetUI();
             }
         }
 
         function answerCall() {
+            console.info(`[CALL] Botón 'Contestar' presionado para la llamada: ${currentCallId}`);
             if (currentCallId && ws.readyState === WebSocket.OPEN) {
-                console.log(`Enviando solicitud para contestar la llamada: ${currentCallId}`);
-                ws.send(JSON.stringify({ type: 'answer_call', call_id: currentCallId }));
+                const payload = { type: 'answer_call', call_id: currentCallId };
+                console.log("[WEBSOCKET] Enviando solicitud para contestar la llamada:", payload);
+                ws.send(JSON.stringify(payload));
                 incomingCallAlertEl.style.display = 'none';
+            } else {
+                console.error("[CALL] No se puede contestar. No hay llamada actual o el WebSocket no está abierto.");
             }
         }
 
         function hangup() {
+            console.info(`[CALL] Botón 'Colgar' presionado para la llamada: ${currentCallId}`);
             if (currentCallId && ws.readyState === WebSocket.OPEN) {
-                console.log(`Enviando solicitud para colgar la llamada: ${currentCallId}`);
-                ws.send(JSON.stringify({ type: 'hangup_from_browser', call_id: currentCallId }));
+                const payload = { type: 'hangup_from_browser', call_id: currentCallId };
+                ws.send(JSON.stringify(payload));
             }
             resetUI();
         }
 
         function resetUI() {
-            console.log("Reseteando la interfaz de usuario.");
+            console.warn("[UI] Reseteando la interfaz de usuario y las conexiones.");
             if (browser_pc) {
                 browser_pc.close();
                 browser_pc = null;
