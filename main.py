@@ -184,7 +184,9 @@ async def websocket_endpoint(websocket: WebSocket):
                                             credential=TURN_CREDENTIAL
                                         )
 ]
-                    config = RTCConfiguration(iceServers=ice_servers)
+                    config = RTCConfiguration(iceServers=ice_servers,
+                                              iceTransportPolicy="relay"
+                                              )
                     
                     whatsapp_pc = RTCPeerConnection(configuration=config)
                     browser_pc = RTCPeerConnection(configuration=config)
