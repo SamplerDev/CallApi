@@ -215,52 +215,60 @@ async def websocket_endpoint(websocket: WebSocket):
                     whatsapp_answer = await whatsapp_pc.createAnswer()
                     await whatsapp_pc.setLocalDescription(whatsapp_answer)
 
-                    # --- INICIO DE LA CONSTRUCCIÓN MANUAL DEFINITIVA (GUIADA POR DOCUMENTACIÓN) ---
+                    # --- INICIO DEL LOG DE DEPURACIÓN ---
+                    # Imprimimos el SDP completo que aiortc ha generado.
+                    # Esto nos mostrará la estructura exacta con la que debemos trabajar.
+                    logging.info("--- SDP COMPLETO GENERADO POR AIORTC (PARA DEPURACIÓN) ---")
+                    logging.info(whatsapp_pc.localDescription.sdp.replace('\r\n', '\n'))
+                    logging.info("----------------------------------------------------------")
+                    # --- FIN DEL LOG DE DEPURACIÓN ---
+
+                    # --- INICIO DE LA CONSTRUCCIÓN MANUAL (VERSIÓN ROBUSTA) ---
                     
-                    # Paso 1: Extraer todas las piezas dinámicas del SDP generado por aiortc.
-                    # Este SDP es funcionalmente correcto pero no tiene el formato exacto que WhatsApp quiere.
                     local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                     
                     ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                     ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
                     fingerprint = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=fingerprint:")), None)
                     
-                    # Extraer SSRC, cname, msid y track_id de la misma línea para asegurar consistencia
-                    ssrc_info_line = next((line for line in local_sdp_lines if line.startswith("a=ssrc:") and "msid:" in line), None)
-                    
+                    # --- LÓGICA DE EXTRACCIÓN MEJORADA ---
                     ssrc = None
                     cname = None
                     msid = None
                     track_id = None
 
-                    if ssrc_info_line:
-                        parts = ssrc_info_line.split()
+                    # 1. Encontrar la primera línea SSRC que tenga un CNAME para identificar el stream principal.
+                    cname_line = next((line for line in local_sdp_lines if line.startswith("a=ssrc:") and "cname:" in line), None)
+                    if cname_line:
+                        parts = cname_line.split()
                         ssrc = parts[0].split(':')[1]
-                        msid = parts[2]
-                        track_id = parts[3]
-                        
-                        # El cname está en una línea separada pero con el mismo ssrc
-                        cname_line = next((line for line in local_sdp_lines if line.startswith(f"a=ssrc:{ssrc}") and "cname:" in line), None)
-                        if cname_line:
-                            cname = cname_line.split('cname:')[1]
+                        cname = parts[1].split('cname:')[1]
+
+                    # 2. Si encontramos un SSRC, ahora buscamos su línea MSID correspondiente.
+                    if ssrc:
+                        msid_line = next((line for line in local_sdp_lines if line.startswith(f"a=ssrc:{ssrc}") and "msid:" in line), None)
+                        if msid_line:
+                            parts = msid_line.split()
+                            # Asegurarse de que el índice sea correcto
+                            if len(parts) >= 4:
+                                msid = parts[2]
+                                track_id = parts[3]
+                    # --- FIN DE LÓGICA DE EXTRACCIÓN MEJORADA ---
 
                     if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname, msid, track_id]):
                         logging.error("Fallo al extraer una o más piezas críticas del SDP de aiortc. Abortando.")
                         logging.error(f"Valores extraídos: ufrag={bool(ice_ufrag)}, pwd={bool(ice_pwd)}, fingerprint={bool(fingerprint)}, ssrc={bool(ssrc)}, cname={bool(cname)}, msid={bool(msid)}, track_id={bool(track_id)}")
                         continue
 
-                    # Paso 2: Generar un nuevo session_id para la línea 'o='
                     session_id = int(time.time() * 1000)
 
-                    # Paso 3: Ensamblar el SDP final, replicando la estructura de la documentación
-                    # con los valores extraídos de aiortc.
                     final_sdp = (
                         "v=0\r\n"
                         f"o=- {session_id} 2 IN IP4 127.0.0.1\r\n"
                         "s=-\r\n"
                         "t=0 0\r\n"
                         "a=group:BUNDLE audio\r\n"
-                        f"a=msid-semantic: WMS {msid}\r\n" # Usamos el msid de la pista real
+                        f"a=msid-semantic: WMS {msid}\r\n"
                         "m=audio 9 UDP/TLS/RTP/SAVPF 111 126\r\n"
                         "c=IN IP4 0.0.0.0\r\n"
                         "a=rtcp:9 IN IP4 0.0.0.0\r\n"
@@ -279,10 +287,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         "a=fmtp:111 minptime=10;useinbandfec=1\r\n"
                         "a=rtpmap:126 telephone-event/8000\r\n"
                         f"a=ssrc:{ssrc} cname:{cname}\r\n"
-                        f"a=ssrc:{ssrc} msid:{msid} {track_id}\r\n" # Usamos el msid y track_id de la pista real
+                        f"a=ssrc:{ssrc} msid:{msid} {track_id}\r\n"
                     )
                     
-                    logging.info("--- SDP FINAL CONSTRUIDO (MODELO DOCUMENTACIÓN) ---")
+                    logging.info("--- SDP FINAL CONSTRUIDO (EXTRACCIÓN ROBUSTA) ---")
                     logging.info(final_sdp.replace('\r\n', '\n'))
                     logging.info("----------------------------------------------------")
                     
@@ -294,7 +302,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         logging.info(f"Puente WebRTC para la llamada {call_id} completado y activo.")
                     else:
                         logging.error(f"Falló el pre_accept para {call_id}. No se pudo conectar la llamada.")
-
                 elif event_type == "hangup_from_browser":
                     if call_id in active_calls:
                         await send_call_action(call_id, "terminate")
