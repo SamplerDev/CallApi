@@ -170,9 +170,20 @@ async def websocket_endpoint(websocket: WebSocket):
                     session["agent_websocket"] = websocket
 
                     ice_servers = [
-                        RTCIceServer(urls="stun:stun.l.google.com:19302"), 
-                        RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
-                    ]
+                                        RTCIceServer(urls="stun:stun.l.google.com:19302"), 
+                                        # Servidor TURN sobre UDP (el que ya tenías)
+                                        RTCIceServer(
+                                            urls="turn:global.relay.metered.ca:80", 
+                                            username=TURN_USERNAME, 
+                                            credential=TURN_CREDENTIAL
+                                        ),
+                                        # Servidor TURN sobre TCP (más robusto contra firewalls)
+                                        RTCIceServer(
+                                            urls="turns:global.relay.metered.ca:443?transport=tcp", 
+                                            username=TURN_USERNAME, 
+                                            credential=TURN_CREDENTIAL
+                                        )
+]
                     config = RTCConfiguration(iceServers=ice_servers)
                     
                     whatsapp_pc = RTCPeerConnection(configuration=config)
