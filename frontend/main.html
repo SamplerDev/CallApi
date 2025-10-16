@@ -110,20 +110,21 @@
                 console.log("Recibida pista de audio remota.");
                 if (remoteAudioEl.srcObject !== event.streams[0]) {
                     remoteAudioEl.srcObject = event.streams[0];
+                    
+                    // Forzamos la reproducción para evitar bloqueos de autoplay del navegador.
+                    remoteAudioEl.play().catch(error => {
+                        console.error("Error al intentar reproducir el audio automáticamente:", error);
+                    });
                 }
             };
 
             try {
-                // --- INICIO DE LA MODIFICACIÓN FINAL ---
-                // 1. Pedir acceso al micrófono ANTES de negociar.
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
                 
-                // 2. Añadir las pistas del micrófono a la conexión para que se envíen.
                 localStream.getTracks().forEach(track => {
                     console.log("Añadiendo pista de audio local (micrófono) a la conexión.");
                     browser_pc.addTrack(track, localStream);
                 });
-                // --- FIN DE LA MODIFICACIÓN FINAL ---
 
                 await browser_pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
                 const answer = await browser_pc.createAnswer();
