@@ -13,6 +13,8 @@ import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 import uvicorn
 from fastapi.responses import HTMLResponse
+from aiortc.contrib.media import MediaRelay
+
 
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
@@ -147,7 +149,6 @@ async def websocket_endpoint(websocket: WebSocket):
     
     current_websocket = websocket
     call_id_handled_by_this_ws = None
-    relay = MediaRelay()
 
     try:
         while True:
@@ -174,40 +175,47 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 ice_servers = [
                     RTCIceServer(urls="stun:stun.l.google.com:19302"),
-                    RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
-                    RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
+                    RTCIceServer(
+                        urls="turn:global.relay.metered.ca:80", 
+                        username=TURN_USERNAME, 
+                        credential=TURN_CREDENTIAL
+                    ),
+                    RTCIceServer(
+                        urls="turns:global.relay.metered.ca:443?transport=tcp", 
+                        username=TURN_USERNAME, 
+                        credential=TURN_CREDENTIAL
+                    )
                 ]
                 config = RTCConfiguration(iceServers=ice_servers)
                 
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 browser_pc = RTCPeerConnection(configuration=config)
-                
+
+                # --- Forzar el uso de TURN después de la creación ---
                 whatsapp_pc.iceTransportPolicy = "relay"
                 browser_pc.iceTransportPolicy = "relay"
+                logging.info(f"[{call_id}] Política de transporte ICE forzada a 'relay' para ambas conexiones.")
                 
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
 
-                @browser_pc.on("track")
-                async def on_browser_track(track):
-                    logging.info(f"[{call_id}] Pista del navegador recibida.")
-                    if whatsapp_pc.connectionState != 'closed':
-                        whatsapp_pc.addTrack(relay.subscribe(track))
-
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
-                    logging.info(f"[{call_id}] Pista de WhatsApp recibida.")
-                    if browser_pc.connectionState != 'closed':
-                        browser_pc.addTrack(relay.subscribe(track))
-                
-                # --- CORRECCIÓN FINAL ---
-                # Preparamos la conexión del navegador para que espere una pista de audio bidireccional.
-                # Sin esta línea, createOffer() genera un SDP vacío sin sección de medios.
-                browser_pc.addTransceiver("audio", direction="sendrecv") # <-- 2. LÍNEA CLAVE AÑADIDA
-                
+                    logging.info(f"[{call_id}] Pista de WhatsApp recibida. Añadiendo a browser_pc.")
+                    browser_pc.addTrack(track)
+
+                @browser_pc.on("track")
+                async def on_browser_track(track):
+                    logging.info(f"[{call_id}] Pista del navegador recibida. Añadiendo a whatsapp_pc.")
+                    whatsapp_pc.addTrack(track)
+
+                # 1. Iniciar negociación con el navegador PRIMERO
+                logging.info(f"[{call_id}] Creando oferta para el navegador.")
+                browser_pc.addTransceiver("audio", direction="sendrecv")
                 browser_offer = await browser_pc.createOffer()
                 await browser_pc.setLocalDescription(browser_offer)
                 
+                logging.info(f"[{call_id}] Enviando oferta al navegador.")
                 await websocket.send_json({
                     "type": "offer_from_server",
                     "call_id": call_id,
@@ -224,6 +232,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 await browser_pc.setRemoteDescription(browser_answer)
                 logging.info(f"[{call_id}] Negociación con navegador completada.")
 
+                # 2. Ahora que el puente está listo en el lado del navegador, negociar con WhatsApp
+                logging.info(f"[{call_id}] Iniciando negociación con WhatsApp.")
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
                 
@@ -231,6 +241,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
                 logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
 
+                # 3. Construir el SDP final
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                 ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                 ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
@@ -278,14 +289,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     await send_call_action(call_id, "terminate")
             
     except WebSocketDisconnect as e:
-        logging.info(f"Cliente {websocket.client} desconectado con código: {e.code}")
+        logging.info(f"Cliente {current_websocket.client} desconectado con código: {e.code}")
     finally:
         lobby_clients.discard(current_websocket)
         if call_id_handled_by_this_ws and call_id_handled_by_this_ws in active_calls:
             logging.warning(f"El agente de la llamada {call_id_handled_by_this_ws} se desconectó. Terminando la llamada.")
             await send_call_action(call_id_handled_by_this_ws, "terminate")
-            logging.info(f"Limpieza de cliente del lobby. Total: {len(lobby_clients)}")
-
+        logging.info(f"Limpieza de cliente del lobby. Total: {len(lobby_clients)}")
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
