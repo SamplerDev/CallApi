@@ -148,7 +148,6 @@ async def receive_call_notification(request: Request):
         logging.error(f"Error inesperado al procesar el webhook: {e}", exc_info=True)
 
     return Response(status_code=200)
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -183,47 +182,52 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 ice_servers = [
                     RTCIceServer(urls="stun:stun.l.google.com:19302"),
-                    RTCIceServer(
-                        urls="turn:global.relay.metered.ca:80", 
-                        username=TURN_USERNAME, 
-                        credential=TURN_CREDENTIAL
-                    ),
-                    RTCIceServer(
-                        urls="turns:global.relay.metered.ca:443?transport=tcp", 
-                        username=TURN_USERNAME, 
-                        credential=TURN_CREDENTIAL
-                    )
+                    RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
+                    RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
                 ]
                 config = RTCConfiguration(iceServers=ice_servers)
                 
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 browser_pc = RTCPeerConnection(configuration=config)
-
-                # --- Forzar el uso de TURN después de la creación ---
+                
                 whatsapp_pc.iceTransportPolicy = "relay"
                 browser_pc.iceTransportPolicy = "relay"
-                logging.info(f"[{call_id}] Política de transporte ICE forzada a 'relay' para ambas conexiones.")
                 
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
 
-                @whatsapp_pc.on("track")
-                async def on_whatsapp_track(track):
-                    logging.info(f"[{call_id}] Pista de WhatsApp recibida. Añadiendo a browser_pc.")
-                    browser_pc.addTrack(track)
-
+                # --- Lógica de Sincronización con asyncio.Event ---
+                browser_track_ready = asyncio.Event()
+                whatsapp_track_ready = asyncio.Event()
+                
                 @browser_pc.on("track")
                 async def on_browser_track(track):
-                    logging.info(f"[{call_id}] Pista del navegador recibida. Añadiendo a whatsapp_pc.")
-                    whatsapp_pc.addTrack(track)
+                    logging.info(f"[{call_id}] Pista del navegador recibida.")
+                    session["browser_track"] = track
+                    browser_track_ready.set()
 
-                # 1. Iniciar negociación con el navegador PRIMERO
-                logging.info(f"[{call_id}] Creando oferta para el navegador.")
+                @whatsapp_pc.on("track")
+                async def on_whatsapp_track(track):
+                    logging.info(f"[{call_id}] Pista de WhatsApp recibida.")
+                    session["whatsapp_track"] = track
+                    whatsapp_track_ready.set()
+
+                # Iniciar una tarea en segundo plano para construir el puente cuando todo esté listo
+                async def bridge_tracks():
+                    logging.info(f"[{call_id}] Tarea de puente iniciada, esperando ambas pistas...")
+                    await asyncio.gather(browser_track_ready.wait(), whatsapp_track_ready.wait())
+                    
+                    logging.info(f"[{call_id}] ¡Ambas pistas recibidas! Conectando el puente.")
+                    whatsapp_pc.addTrack(session["browser_track"])
+                    browser_pc.addTrack(session["whatsapp_track"])
+
+                asyncio.create_task(bridge_tracks())
+                # --- Fin de la Lógica de Sincronización ---
+
+                # 1. Iniciar negociación con el navegador
                 browser_pc.addTransceiver("audio", direction="sendrecv")
                 browser_offer = await browser_pc.createOffer()
                 await browser_pc.setLocalDescription(browser_offer)
-                
-                logging.info(f"[{call_id}] Enviando oferta al navegador.")
                 await websocket.send_json({
                     "type": "offer_from_server",
                     "call_id": call_id,
@@ -240,8 +244,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 await browser_pc.setRemoteDescription(browser_answer)
                 logging.info(f"[{call_id}] Negociación con navegador completada.")
 
-                # 2. Ahora que el puente está listo en el lado del navegador, negociar con WhatsApp
-                logging.info(f"[{call_id}] Iniciando negociación con WhatsApp.")
+                # 2. Ahora negociar con WhatsApp
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
                 
@@ -249,7 +252,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
                 logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
 
-                # 3. Construir el SDP final
+                # 3. Construir y enviar el SDP final
+                # (El código de construcción manual es correcto, lo mantenemos)
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                 ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                 ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
