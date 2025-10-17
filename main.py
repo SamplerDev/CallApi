@@ -13,6 +13,8 @@ import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 import uvicorn
 from fastapi.responses import HTMLResponse
+from aiortc.contrib.media import MediaRelay
+
 
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
@@ -149,8 +151,6 @@ async def receive_call_notification(request: Request):
 
     return Response(status_code=200)
 
-# main.py - Reemplaza esta función completa
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -159,6 +159,7 @@ async def websocket_endpoint(websocket: WebSocket):
     
     current_websocket = websocket
     call_id_handled_by_this_ws = None
+    relay = MediaRelay()
 
     try:
         while True:
@@ -199,33 +200,28 @@ async def websocket_endpoint(websocket: WebSocket):
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
 
-                # --- SOLUCIÓN BASADA EN DOCUMENTACIÓN: Sincronización Explícita ---
-                # Se crea un "semáforo" (asyncio.Event) para asegurar que no negociamos con WhatsApp
-                # hasta que la pista de audio del navegador haya llegado físicamente.
-                browser_track_received_event = asyncio.Event()
-                session["browser_track_received_event"] = browser_track_received_event
+                # --- SOLUCIÓN CON MediaRelay ---
+                # Este es el método más robusto para puentear pistas en aiortc.
 
                 @browser_pc.on("track")
                 async def on_browser_track(track):
                     logging.info(f"[{call_id}] Pista del navegador recibida.")
-                    session["browser_track"] = track
-                    # Se levanta el semáforo, permitiendo que el flujo principal continúe.
-                    browser_track_received_event.set()
+                    # Añadimos una pista a la conexión de WhatsApp que será alimentada por el relay.
+                    whatsapp_sender_track = whatsapp_pc.addTrack(relay.subscribe(track))
+                    
+                    # Guardamos el sender para poder detenerlo si es necesario.
+                    session["whatsapp_sender"] = whatsapp_sender_track
 
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
                     logging.info(f"[{call_id}] Pista de WhatsApp recibida.")
-                    # Añadimos la pista de WhatsApp para que se envíe al navegador.
-                    # Esto es seguro porque la negociación con el navegador ya está en curso.
-                    browser_pc.addTrack(track)
+                    # Añadimos una pista a la conexión del navegador que será alimentada por el relay.
+                    browser_pc.addTrack(relay.subscribe(track))
                 
-                # FASE 1: Negociar con el navegador y esperar su pista.
-                # Se añade un transceptor para indicar que queremos enviar y recibir audio.
-                browser_pc.addTransceiver("audio", direction="sendrecv")
+                # 1. Iniciar negociación con el navegador.
                 browser_offer = await browser_pc.createOffer()
                 await browser_pc.setLocalDescription(browser_offer)
                 
-                # Enviamos la oferta al navegador para que nos responda y envíe su audio.
                 await websocket.send_json({
                     "type": "offer_from_server",
                     "call_id": call_id,
@@ -242,29 +238,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 await browser_pc.setRemoteDescription(browser_answer)
                 logging.info(f"[{call_id}] Negociación con navegador completada.")
 
-                # --- BARRERA DE SINCRONIZACIÓN ---
-                # El código se detiene aquí hasta que el evento on_browser_track() llame a .set().
-                # Esto garantiza que session["browser_track"] existe antes de continuar.
-                logging.info(f"[{call_id}] Esperando la pista de audio física del navegador...")
-                await session["browser_track_received_event"].wait()
-                logging.info(f"[{call_id}] Pista del navegador confirmada. Procediendo con WhatsApp.")
-
-                # FASE 2: Negociar con WhatsApp, ahora con la pista del navegador en mano.
-                # 1. Añadir la pista del navegador a la conexión de WhatsApp.
-                #    Este es el paso crucial que faltaba.
-                whatsapp_pc.addTrack(session["browser_track"])
-
-                # 2. Ahora que la pista está añadida, podemos negociar con WhatsApp.
+                # 2. Ahora negociamos con WhatsApp.
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
                 
-                # 3. Creamos la respuesta. Como la pista ya está añadida, el SDP será 'sendrecv'.
                 whatsapp_answer = await whatsapp_pc.createAnswer()
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
-                logging.info(f"[{call_id}] Respuesta para WhatsApp generada (con pista de envío incluida).")
+                logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
 
-                # 4. Tu código de construcción manual de SDP ahora funcionará correctamente,
-                #    ya que se basa en un localDescription que es bidireccional.
+                # 3. Tu código de construcción manual de SDP.
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                 ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                 ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
@@ -298,7 +280,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     f"a=ssrc:{ssrc} msid:{msid} {track_id}\r\n"
                 )
                 
-                # 5. Enviar el SDP correcto a WhatsApp.
                 pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
                 if pre_accept_response:
                     await asyncio.sleep(1)
