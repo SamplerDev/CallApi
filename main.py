@@ -211,10 +211,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     if browser_pc.connectionState != 'closed':
                         browser_pc.addTrack(relay.subscribe(track))
                 
-                # --- CORRECCIÓN FINAL ---
-                # Preparamos la conexión del navegador para que espere una pista de audio bidireccional.
-                # Sin esta línea, createOffer() genera un SDP vacío sin sección de medios.
-                browser_pc.addTransceiver("audio", direction="sendrecv") ### LÍNEA CLAVE AÑADIDA ###
+               
+                browser_pc.addTransceiver("audio", direction="sendrecv") 
                 
                 browser_offer = await browser_pc.createOffer()
                 await browser_pc.setLocalDescription(browser_offer)
@@ -296,7 +294,6 @@ async def websocket_endpoint(websocket: WebSocket):
             logging.warning(f"El agente de la llamada {call_id_handled_by_this_ws} se desconectó. Terminando la llamada.")
             await send_call_action(call_id_handled_by_this_ws, "terminate")
         logging.info(f"Limpieza de cliente del lobby. Total: {len(lobby_clients)}")
-
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
