@@ -10,15 +10,15 @@ import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 import uvicorn
 from fastapi.responses import HTMLResponse
-# No se necesita MediaRelay para esta solución simplificada y correcta.
-# from aiortc.contrib.media import MediaRelay
+# MediaRelay ya no es necesario con este enfoque
+# from aiortc.contrib.media import MediaRelay 
 
 
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ACTIVAR LOGS DETALLADOS DE WEBRTC (ESENCIAL PARA DEBUG)
+# ACTIVAR LOGS DETALLADOS DE WEBRTC
 logging.getLogger("aiortc").setLevel(logging.DEBUG)
 
 # Cargar credenciales
@@ -43,7 +43,7 @@ app = FastAPI(title="WhatsApp WebRTC Bridge - Final Version")
 # --- 3. CONFIGURACIÓN DE CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # En producción, cambiar por el dominio del frontend
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -114,7 +114,7 @@ async def receive_call_notification(request: Request):
 
         elif event == "terminate":
             if call_id in active_calls:
-                session = active_calls.pop(call_id, {}) # Usar pop para obtener y eliminar de forma atómica
+                session = active_calls.pop(call_id, {})
                 agent_ws = session.get("agent_websocket")
                 if agent_ws:
                     try:
@@ -176,9 +176,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
 
-                # --- [CORRECCIÓN] LÓGICA DEL PUENTE DE MEDIOS ---
-                # Se definen los manejadores de eventos. Cuando una pista llega a una conexión,
-                # se añade a la otra para que la retransmita.
+                # --- LÓGICA DEL PUENTE DE MEDIOS ---
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
                     logging.info(f"[{call_id}] Pista de WhatsApp recibida. Añadiendo a la conexión del navegador.")
@@ -190,9 +188,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     whatsapp_pc.addTrack(track)
 
                 # 1. Iniciar negociación con el navegador PRIMERO
-                # ESTA ES LA LÍNEA CLAVE: Crea UN ÚNICO canal de audio BIDIRECCIONAL.
-                # Esto genera una oferta SDP correcta que le dice al navegador:
-                # "Prepárate para enviar y recibir audio en este canal".
+                # Crea UN ÚNICO canal de audio BIDIRECCIONAL.
                 browser_pc.addTransceiver("audio", direction="sendrecv")
                 
                 logging.info(f"[{call_id}] Creando oferta para el navegador.")
@@ -225,15 +221,45 @@ async def websocket_endpoint(websocket: WebSocket):
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
                 logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
 
-                # --- [CORRECCIÓN] USAR EL SDP GENERADO DIRECTAMENTE ---
-                # La construcción manual de SDP es frágil y propensa a errores.
-                # El SDP generado por aiortc es completo y válido.
-                final_sdp = whatsapp_pc.localDescription.sdp
-                logging.debug(f"[{call_id}] SDP final para WhatsApp:\n{final_sdp}")
+                # --- [CORRECCIÓN] RESTAURAR LA CONSTRUCCIÓN MANUAL DEL SDP ---
+                # La API de WhatsApp requiere un formato de SDP específico que aiortc no genera por defecto.
+                # Este bloque, aunque parece frágil, es necesario.
+                local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
+                ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
+                ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
+                fingerprint = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=fingerprint:")), None)
+                ssrc, cname, msid, track_id = None, None, None, None
+                cname_line = next((line for line in local_sdp_lines if line.startswith("a=ssrc:") and "cname:" in line), None)
+                if cname_line:
+                    parts = cname_line.split(); ssrc = parts[0].split(':')[1]; cname = parts[1].split('cname:')[1]
+                msid_line = next((line for line in local_sdp_lines if line.startswith("a=msid:")), None)
+                if msid_line:
+                    parts = msid_line.split(); msid = parts[0].split(':')[1]; track_id = parts[1]
+
+                if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname, msid, track_id]):
+                    logging.error(f"[{call_id}] Fallo crítico en la extracción de SDP. Abortando.")
+                    continue
+
+                session_id_val = int(time.time() * 1000)
+                final_sdp = (
+                    f"v=0\r\no=- {session_id_val} 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE audio\r\n"
+                    f"a=msid-semantic: WMS {msid}\r\n"
+                    "m=audio 9 UDP/TLS/RTP/SAVPF 111 126\r\nc=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\n"
+                    f"a=ice-ufrag:{ice_ufrag}\r\na=ice-pwd:{ice_pwd}\r\na=fingerprint:{fingerprint}\r\n"
+                    "a=setup:active\r\na=mid:audio\r\n"
+                    "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
+                    "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext:abs-send-time\r\n"
+                    "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
+                    "a=sendrecv\r\na=rtcp-mux\r\n"
+                    "a=rtpmap:111 opus/48000/2\r\na=rtcp-fb:111 transport-cc\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n"
+                    "a=rtpmap:126 telephone-event/8000\r\n"
+                    f"a=ssrc:{ssrc} cname:{cname}\r\n"
+                    f"a=ssrc:{ssrc} msid:{msid} {track_id}\r\n"
+                )
+                logging.debug(f"[{call_id}] SDP final (manual) para WhatsApp:\n{final_sdp}")
                 
                 pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
                 if pre_accept_response:
-                    # Este sleep es a menudo necesario para dar tiempo a los servidores de WhatsApp.
                     await asyncio.sleep(1)
                     await send_call_action(call_id, "accept", final_sdp)
                     session["status"] = "active"
@@ -261,10 +287,9 @@ async def serve_frontend():
         with open(frontend_path) as f:
             return HTMLResponse(content=f.read())
     except FileNotFoundError:
-        return HTMLResponse(content="<h1>Frontend no encontrado. Asegúrate de que el archivo 'main.html' está en una carpeta 'frontend'.</h1>", status_code=404)
+        return HTMLResponse(content="<h1>Frontend no encontrado.</h1>", status_code=404)
 
 # --- 6. EJECUCIÓN DEL SERVIDOR ---
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 8000))
-    # `reload=True` es útil para desarrollo. Quítalo en producción.
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
