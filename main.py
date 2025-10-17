@@ -13,7 +13,6 @@ import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 import uvicorn
 from fastapi.responses import HTMLResponse
-from aiortc.contrib.media import MediaRelay
 
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
@@ -102,21 +101,11 @@ async def receive_call_notification(request: Request):
         event = call_data.get("event")
 
         if event == "connect":
-            # Esperar hasta 5 segundos por si un agente se está reconectando
-            for _ in range(5):
-                if lobby_clients:
-                    break
-                logging.info(f"Llamada {call_id} en espera, aguardando conexión de un agente...")
-                await asyncio.sleep(1)
-
-            # Si después de esperar, sigue sin haber nadie, entonces rechazar.
             if not lobby_clients:
-                logging.warning(f"Llamada {call_id} recibida, pero no hay agentes en el lobby después de esperar. Rechazando.")
+                logging.warning(f"Llamada {call_id} recibida, pero no hay agentes en el lobby. Rechazando.")
                 await send_call_action(call_id, "reject")
                 return Response(status_code=200)
-            # --- FIN DE LÓGICA MEJORADA ---
 
-            # Guardamos la información de la llamada, esperando que un agente la tome
             active_calls[call_id] = {
                 "status": "ringing",
                 "call_data": call_data,
@@ -160,165 +149,134 @@ async def websocket_endpoint(websocket: WebSocket):
     call_id_handled_by_this_ws = None
     relay = MediaRelay()
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    lobby_clients.add(websocket)
-    logging.info(f"Nuevo cliente conectado al lobby. Total: {len(lobby_clients)}")
-    
-    current_websocket = websocket
-    call_id_handled_by_this_ws = None
+    try:
+        while True:
+            data = await websocket.receive_json()
+            event_type = data.get("type")
+            call_id = data.get("call_id")
 
-    # --- TAREA PARA RECIBIR MENSAJES ---
-    async def receive_task():
-        nonlocal call_id_handled_by_this_ws
-        try:
-            while True:
-                data = await websocket.receive_json()
-                event_type = data.get("type")
-                call_id = data.get("call_id")
+            session = active_calls.get(call_id)
+            if not session:
+                logging.warning(f"[{call_id or 'N/A'}] Evento '{event_type}' para llamada no activa.")
+                continue
 
-                session = active_calls.get(call_id)
-                if not session:
-                    logging.warning(f"[{call_id or 'N/A'}] Evento '{event_type}' para llamada no activa.")
+            if event_type == "answer_call":
+                if session.get("status") != "ringing":
+                    logging.warning(f"[{call_id}] Intento de contestar llamada ya tomada.")
+                    await websocket.send_json({"type": "call_already_taken"})
                     continue
 
-                if event_type == "answer_call":
-                    if session.get("status") != "ringing":
-                        logging.warning(f"[{call_id}] Intento de contestar llamada ya tomada.")
-                        await websocket.send_json({"type": "call_already_taken"})
-                        continue
+                logging.info(f"[{call_id}] Agente ha contestado. Iniciando negociación de puente.")
+                
+                session["status"] = "negotiating"
+                session["agent_websocket"] = websocket
+                call_id_handled_by_this_ws = call_id
 
-                    logging.info(f"[{call_id}] Agente ha contestado. Iniciando negociación de puente.")
-                    
-                    session["status"] = "negotiating"
-                    session["agent_websocket"] = websocket
-                    call_id_handled_by_this_ws = call_id
+                ice_servers = [
+                    RTCIceServer(urls="stun:stun.l.google.com:19302"),
+                    RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
+                    RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
+                ]
+                config = RTCConfiguration(iceServers=ice_servers)
+                
+                whatsapp_pc = RTCPeerConnection(configuration=config)
+                browser_pc = RTCPeerConnection(configuration=config)
+                
+                whatsapp_pc.iceTransportPolicy = "relay"
+                browser_pc.iceTransportPolicy = "relay"
+                
+                session["whatsapp_pc"] = whatsapp_pc
+                session["browser_pc"] = browser_pc
 
-                    ice_servers = [
-                        RTCIceServer(urls="stun:stun.l.google.com:19302"),
-                        RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
-                        RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
-                    ]
-                    config = RTCConfiguration(iceServers=ice_servers)
-                    
-                    whatsapp_pc = RTCPeerConnection(configuration=config)
-                    browser_pc = RTCPeerConnection(configuration=config)
-                    
-                    whatsapp_pc.iceTransportPolicy = "relay"
-                    browser_pc.iceTransportPolicy = "relay"
-                    
-                    session["whatsapp_pc"] = whatsapp_pc
-                    session["browser_pc"] = browser_pc
+                @browser_pc.on("track")
+                async def on_browser_track(track):
+                    logging.info(f"[{call_id}] Pista del navegador recibida.")
+                    if whatsapp_pc.connectionState != 'closed':
+                        whatsapp_pc.addTrack(relay.subscribe(track))
 
-                    browser_track_received_event = asyncio.Event()
-                    session["browser_track_received_event"] = browser_track_received_event
+                @whatsapp_pc.on("track")
+                async def on_whatsapp_track(track):
+                    logging.info(f"[{call_id}] Pista de WhatsApp recibida.")
+                    if browser_pc.connectionState != 'closed':
+                        browser_pc.addTrack(relay.subscribe(track))
+                
+                # --- CORRECCIÓN FINAL ---
+                # Preparamos la conexión del navegador para que espere una pista de audio bidireccional.
+                # Sin esta línea, createOffer() genera un SDP vacío sin sección de medios.
+                browser_pc.addTransceiver("audio", direction="sendrecv") # <-- 2. LÍNEA CLAVE AÑADIDA
+                
+                browser_offer = await browser_pc.createOffer()
+                await browser_pc.setLocalDescription(browser_offer)
+                
+                await websocket.send_json({
+                    "type": "offer_from_server",
+                    "call_id": call_id,
+                    "sdp": browser_pc.localDescription.sdp
+                })
 
-                    @browser_pc.on("track")
-                    async def on_browser_track(track):
-                        logging.info(f"[{call_id}] Pista del navegador recibida.")
-                        session["browser_track"] = track
-                        browser_track_received_event.set()
+            elif event_type == "answer_from_browser":
+                logging.info(f"[{call_id}] Recibida RESPUESTA SDP del navegador.")
+                
+                whatsapp_pc = session["whatsapp_pc"]
+                browser_pc = session["browser_pc"]
 
-                    @whatsapp_pc.on("track")
-                    async def on_whatsapp_track(track):
-                        logging.info(f"[{call_id}] Pista de WhatsApp recibida.")
-                        if browser_pc.connectionState != 'closed':
-                            browser_pc.addTrack(track)
-                    
-                    browser_pc.addTransceiver("audio", direction="sendrecv")
-                    browser_offer = await browser_pc.createOffer()
-                    await browser_pc.setLocalDescription(browser_offer)
-                    
-                    await websocket.send_json({
-                        "type": "offer_from_server",
-                        "call_id": call_id,
-                        "sdp": browser_pc.localDescription.sdp
-                    })
+                browser_answer = RTCSessionDescription(sdp=data["sdp"], type="answer")
+                await browser_pc.setRemoteDescription(browser_answer)
+                logging.info(f"[{call_id}] Negociación con navegador completada.")
 
-                elif event_type == "answer_from_browser":
-                    logging.info(f"[{call_id}] Recibida RESPUESTA SDP del navegador.")
-                    
-                    whatsapp_pc = session["whatsapp_pc"]
-                    browser_pc = session["browser_pc"]
+                whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
+                await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
+                
+                whatsapp_answer = await whatsapp_pc.createAnswer()
+                await whatsapp_pc.setLocalDescription(whatsapp_answer)
+                logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
 
-                    browser_answer = RTCSessionDescription(sdp=data["sdp"], type="answer")
-                    await browser_pc.setRemoteDescription(browser_answer)
-                    logging.info(f"[{call_id}] Negociación con navegador completada.")
+                local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
+                ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
+                ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
+                fingerprint = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=fingerprint:")), None)
+                ssrc, cname, msid, track_id = None, None, None, None
+                cname_line = next((line for line in local_sdp_lines if line.startswith("a=ssrc:") and "cname:" in line), None)
+                if cname_line:
+                    parts = cname_line.split(); ssrc = parts[0].split(':')[1]; cname = parts[1].split('cname:')[1]
+                msid_line = next((line for line in local_sdp_lines if line.startswith("a=msid:")), None)
+                if msid_line:
+                    parts = msid_line.split(); msid = parts[0].split(':')[1]; track_id = parts[1]
 
-                    logging.info(f"[{call_id}] Esperando la pista de audio física del navegador...")
-                    await session["browser_track_received_event"].wait()
-                    logging.info(f"[{call_id}] Pista del navegador confirmada. Procediendo con WhatsApp.")
+                if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname, msid, track_id]):
+                    logging.error(f"[{call_id}] Fallo crítico en la extracción de SDP. Abortando.")
+                    continue
 
-                    whatsapp_pc.addTrack(session["browser_track"])
+                session_id_val = int(time.time() * 1000)
+                final_sdp = (
+                    f"v=0\r\no=- {session_id_val} 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE audio\r\n"
+                    f"a=msid-semantic: WMS {msid}\r\n"
+                    "m=audio 9 UDP/TLS/RTP/SAVPF 111 126\r\nc=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\n"
+                    f"a=ice-ufrag:{ice_ufrag}\r\na=ice-pwd:{ice_pwd}\r\na=fingerprint:{fingerprint}\r\n"
+                    "a=setup:active\r\na=mid:audio\r\n"
+                    "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
+                    "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext:abs-send-time\r\n"
+                    "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
+                    "a=sendrecv\r\na=rtcp-mux\r\n"
+                    "a=rtpmap:111 opus/48000/2\r\na=rtcp-fb:111 transport-cc\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n"
+                    "a=rtpmap:126 telephone-event/8000\r\n"
+                    f"a=ssrc:{ssrc} cname:{cname}\r\n"
+                    f"a=ssrc:{ssrc} msid:{msid} {track_id}\r\n"
+                )
+                
+                pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
+                if pre_accept_response:
+                    await asyncio.sleep(1)
+                    await send_call_action(call_id, "accept", final_sdp)
+                    session["status"] = "active"
+                    logging.info(f"[{call_id}] Puente WebRTC completado y activo.")
+                else:
+                    logging.error(f"[{call_id}] Falló el pre_accept. No se pudo conectar la llamada.")
 
-                    whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
-                    await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
-                    
-                    whatsapp_answer = await whatsapp_pc.createAnswer()
-                    await whatsapp_pc.setLocalDescription(whatsapp_answer)
-                    logging.info(f"[{call_id}] Respuesta para WhatsApp generada (con pista de envío incluida).")
-
-                    local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
-                    ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
-                    ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
-                    fingerprint = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=fingerprint:")), None)
-                    ssrc, cname, msid, track_id = None, None, None, None
-                    cname_line = next((line for line in local_sdp_lines if line.startswith("a=ssrc:") and "cname:" in line), None)
-                    if cname_line:
-                        parts = cname_line.split(); ssrc = parts[0].split(':')[1]; cname = parts[1].split('cname:')[1]
-                    msid_line = next((line for line in local_sdp_lines if line.startswith("a=msid:")), None)
-                    if msid_line:
-                        parts = msid_line.split(); msid = parts[0].split(':')[1]; track_id = parts[1]
-
-                    if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname, msid, track_id]):
-                        logging.error(f"[{call_id}] Fallo crítico en la extracción de SDP. Abortando.")
-                        continue
-
-                    session_id_val = int(time.time() * 1000)
-                    final_sdp = (
-                        f"v=0\r\no=- {session_id_val} 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE audio\r\n"
-                        f"a=msid-semantic: WMS {msid}\r\n"
-                        "m=audio 9 UDP/TLS/RTP/SAVPF 111 126\r\nc=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\n"
-                        f"a=ice-ufrag:{ice_ufrag}\r\na=ice-pwd:{ice_pwd}\r\na=fingerprint:{fingerprint}\r\n"
-                        "a=setup:active\r\na=mid:audio\r\n"
-                        "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
-                        "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext:abs-send-time\r\n"
-                        "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
-                        "a=sendrecv\r\na=rtcp-mux\r\n"
-                        "a=rtpmap:111 opus/48000/2\r\na=rtcp-fb:111 transport-cc\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n"
-                        "a=rtpmap:126 telephone-event/8000\r\n"
-                        f"a=ssrc:{ssrc} cname:{cname}\r\n"
-                        f"a=ssrc:{ssrc} msid:{msid} {track_id}\r\n"
-                    )
-                    
-                    pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
-                    if pre_accept_response:
-                        await asyncio.sleep(1)
-                        await send_call_action(call_id, "accept", final_sdp)
-                        session["status"] = "active"
-                        logging.info(f"[{call_id}] Puente WebRTC completado y activo.")
-                    else:
-                        logging.error(f"[{call_id}] Falló el pre_accept. No se pudo conectar la llamada.")
-
-                elif event_type == "hangup_from_browser":
-                    if call_id in active_calls:
-                        await send_call_action(call_id, "terminate")
-        except WebSocketDisconnect:
-            pass # La desconexión se manejará en el bloque finally
-
-    # --- TAREA PARA ENVIAR PINGS (KEEP-ALIVE) ---
-    async def ping_task():
-        try:
-            while True:
-                await asyncio.sleep(20) # Envía un ping cada 20 segundos
-                await websocket.send_text("ping")
-        except WebSocketDisconnect:
-            pass # La desconexión se manejará en el bloque finally
-
-    try:
-        # Ejecuta ambas tareas concurrentemente. Si una falla, la otra se cancela.
-        await asyncio.gather(receive_task(), ping_task())
+            elif event_type == "hangup_from_browser":
+                if call_id in active_calls:
+                    await send_call_action(call_id, "terminate")
+            
     except WebSocketDisconnect as e:
         logging.info(f"Cliente {websocket.client} desconectado con código: {e.code}")
     finally:
@@ -326,7 +284,8 @@ async def websocket_endpoint(websocket: WebSocket):
         if call_id_handled_by_this_ws and call_id_handled_by_this_ws in active_calls:
             logging.warning(f"El agente de la llamada {call_id_handled_by_this_ws} se desconectó. Terminando la llamada.")
             await send_call_action(call_id_handled_by_this_ws, "terminate")
-        logging.info(f"Limpieza de cliente del lobby. Total: {len(lobby_clients)}")
+            logging.info(f"Limpieza de cliente del lobby. Total: {len(lobby_clients)}")
+
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
