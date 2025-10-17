@@ -158,6 +158,16 @@ async def websocket_endpoint(websocket: WebSocket):
     
     current_websocket = websocket
     call_id_handled_by_this_ws = None
+    relay = MediaRelay()
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    lobby_clients.add(websocket)
+    logging.info(f"Nuevo cliente conectado al lobby. Total: {len(lobby_clients)}")
+    
+    current_websocket = websocket
+    call_id_handled_by_this_ws = None
 
     try:
         while True:
@@ -313,8 +323,6 @@ async def websocket_endpoint(websocket: WebSocket):
             logging.warning(f"El agente de la llamada {call_id_handled_by_this_ws} se desconectó. Terminando la llamada.")
             await send_call_action(call_id_handled_by_this_ws, "terminate")
         logging.info(f"Limpieza de cliente del lobby. Total: {len(lobby_clients)}")
-
-    
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
