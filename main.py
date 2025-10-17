@@ -10,15 +10,10 @@ import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 import uvicorn
 from fastapi.responses import HTMLResponse
-# MediaRelay ya no es necesario con este enfoque
-# from aiortc.contrib.media import MediaRelay 
-
 
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# ACTIVAR LOGS DETALLADOS DE WEBRTC
 logging.getLogger("aiortc").setLevel(logging.DEBUG)
 
 # Cargar credenciales
@@ -48,6 +43,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- [LOG ADICIONAL] TAREA DE MONITORIZACIÓN ---
+async def monitor_connections(call_id: str):
+    logging.info(f"[{call_id}] Iniciando monitor de conexiones.")
+    while call_id in active_calls:
+        session = active_calls.get(call_id, {})
+        browser_pc = session.get("browser_pc")
+        whatsapp_pc = session.get("whatsapp_pc")
+
+        if browser_pc and whatsapp_pc:
+            logging.debug(
+                f"[{call_id}] MONITOR: "
+                f"Browser PC: ice={browser_pc.iceConnectionState}, conn={browser_pc.connectionState} | "
+                f"WhatsApp PC: ice={whatsapp_pc.iceConnectionState}, conn={whatsapp_pc.connectionState}"
+            )
+            
+            # Revisar los senders de la conexión a WhatsApp, que es la que falla
+            if whatsapp_pc.getSenders():
+                for sender in whatsapp_pc.getSenders():
+                    if sender.track:
+                        logging.debug(f"[{call_id}] MONITOR: Sender de WA -> Track: {sender.track.kind} ({sender.track.id}), Transport State: {sender.transport.state}")
+                    else:
+                        logging.debug(f"[{call_id}] MONITOR: Sender de WA -> Sin track asociado.")
+            else:
+                logging.debug(f"[{call_id}] MONITOR: Sin senders en la conexión de WhatsApp.")
+
+        await asyncio.sleep(5) # Revisar cada 5 segundos
+    logging.info(f"[{call_id}] Finalizando monitor de conexiones.")
+
 
 # --- 4. FUNCIONES AUXILIARES ---
 async def send_call_action(call_id: str, action: str, sdp: str = None):
@@ -140,6 +164,7 @@ async def websocket_endpoint(websocket: WebSocket):
     logging.info(f"Nuevo cliente conectado al lobby. Total: {len(lobby_clients)}")
     
     call_id_handled_by_this_ws = None
+    monitor_task = None
 
     try:
         while True:
@@ -179,16 +204,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 # --- LÓGICA DEL PUENTE DE MEDIOS ---
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
-                    logging.info(f"[{call_id}] Pista de WhatsApp recibida. Añadiendo a la conexión del navegador.")
+                    logging.info(f"[{call_id}] Pista de WhatsApp recibida: {repr(track)}. Estado: {track.readyState}")
                     browser_pc.addTrack(track)
 
                 @browser_pc.on("track")
                 async def on_browser_track(track):
-                    logging.info(f"[{call_id}] Pista del navegador recibida. Añadiendo a la conexión de WhatsApp.")
-                    whatsapp_pc.addTrack(track)
+                    logging.info(f"[{call_id}] Pista del navegador recibida: {repr(track)}. Estado: {track.readyState}")
+                    logging.debug(f"[{call_id}] Senders de WA ANTES de addTrack: {whatsapp_pc.getSenders()}")
+                    sender = whatsapp_pc.addTrack(track)
+                    logging.debug(f"[{call_id}] Senders de WA DESPUÉS de addTrack: {whatsapp_pc.getSenders()}")
+                    logging.info(f"[{call_id}] Se añadió la pista del navegador al sender: {repr(sender)}")
 
                 # 1. Iniciar negociación con el navegador PRIMERO
-                # Crea UN ÚNICO canal de audio BIDIRECCIONAL.
                 browser_pc.addTransceiver("audio", direction="sendrecv")
                 
                 logging.info(f"[{call_id}] Creando oferta para el navegador.")
@@ -221,9 +248,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
                 logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
 
-                # --- [CORRECCIÓN] RESTAURAR LA CONSTRUCCIÓN MANUAL DEL SDP ---
-                # La API de WhatsApp requiere un formato de SDP específico que aiortc no genera por defecto.
-                # Este bloque, aunque parece frágil, es necesario.
+                # 3. Construir el SDP final manualmente (necesario para WhatsApp)
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                 ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                 ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
@@ -256,10 +281,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     f"a=ssrc:{ssrc} cname:{cname}\r\n"
                     f"a=ssrc:{ssrc} msid:{msid} {track_id}\r\n"
                 )
-                logging.debug(f"[{call_id}] SDP final (manual) para WhatsApp:\n{final_sdp}")
                 
                 pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
                 if pre_accept_response:
+                    # [LOG ADICIONAL] Iniciar la tarea de monitorización
+                    monitor_task = asyncio.create_task(monitor_connections(call_id))
+                    session["monitor_task"] = monitor_task
+
                     await asyncio.sleep(1)
                     await send_call_action(call_id, "accept", final_sdp)
                     session["status"] = "active"
@@ -275,9 +303,14 @@ async def websocket_endpoint(websocket: WebSocket):
         logging.info(f"Cliente desconectado con código: {e.code}")
     finally:
         lobby_clients.discard(websocket)
-        if call_id_handled_by_this_ws and call_id_handled_by_this_ws in active_calls:
-            logging.warning(f"El agente de la llamada {call_id_handled_by_this_ws} se desconectó. Terminando la llamada.")
-            await send_call_action(call_id_handled_by_this_ws, "terminate")
+        if call_id_handled_by_this_ws:
+            # [LOG ADICIONAL] Cancelar la tarea de monitorización al desconectar
+            session = active_calls.get(call_id_handled_by_this_ws)
+            if session and session.get("monitor_task"):
+                session["monitor_task"].cancel()
+            if call_id_handled_by_this_ws in active_calls:
+                logging.warning(f"El agente de la llamada {call_id_handled_by_this_ws} se desconectó. Terminando la llamada.")
+                await send_call_action(call_id_handled_by_this_ws, "terminate")
         logging.info(f"Limpieza de cliente del lobby. Total restantes: {len(lobby_clients)}")
 
 @app.get("/", response_class=HTMLResponse)
