@@ -158,7 +158,6 @@ async def websocket_endpoint(websocket: WebSocket):
     
     current_websocket = websocket
     call_id_handled_by_this_ws = None
-    relay = MediaRelay()
 
     try:
         while True:
@@ -199,24 +198,33 @@ async def websocket_endpoint(websocket: WebSocket):
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
 
+                # Se crea un "semáforo" (asyncio.Event) para asegurar que no negociamos con WhatsApp
+                # hasta que la pista de audio del navegador haya llegado físicamente.
+                browser_track_received_event = asyncio.Event()
+                session["browser_track_received_event"] = browser_track_received_event
+
                 @browser_pc.on("track")
                 async def on_browser_track(track):
                     logging.info(f"[{call_id}] Pista del navegador recibida.")
-                    if whatsapp_pc.connectionState != 'closed':
-                        whatsapp_pc.addTrack(relay.subscribe(track))
+                    session["browser_track"] = track
+                    # Se levanta el semáforo, permitiendo que el flujo principal continúe.
+                    browser_track_received_event.set()
 
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
                     logging.info(f"[{call_id}] Pista de WhatsApp recibida.")
+                    # Esta pista se añade directamente a la conexión del navegador.
                     if browser_pc.connectionState != 'closed':
-                        browser_pc.addTrack(relay.subscribe(track))
+                        browser_pc.addTrack(track)
                 
-               
-                browser_pc.addTransceiver("audio", direction="sendrecv") 
+                # FASE 1: Iniciar negociación con el navegador.
+                # Se añade un transceptor para que `createOffer` genere un SDP con sección de audio.
+                browser_pc.addTransceiver("audio", direction="sendrecv")
                 
                 browser_offer = await browser_pc.createOffer()
                 await browser_pc.setLocalDescription(browser_offer)
                 
+                # Se envía la oferta al navegador y el servidor se queda esperando su respuesta.
                 await websocket.send_json({
                     "type": "offer_from_server",
                     "call_id": call_id,
@@ -233,13 +241,24 @@ async def websocket_endpoint(websocket: WebSocket):
                 await browser_pc.setRemoteDescription(browser_answer)
                 logging.info(f"[{call_id}] Negociación con navegador completada.")
 
+                # FASE 2: Esperar la pista del navegador y LUEGO negociar con WhatsApp.
+                logging.info(f"[{call_id}] Esperando la pista de audio física del navegador...")
+                await session["browser_track_received_event"].wait()
+                logging.info(f"[{call_id}] Pista del navegador confirmada. Procediendo con WhatsApp.")
+
+                # Con la pista ya disponible, se añade a la conexión de WhatsApp ANTES de crear la respuesta.
+                whatsapp_pc.addTrack(session["browser_track"])
+
+                # Ahora se procede con la negociación de WhatsApp.
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
                 
+                # `createAnswer()` generará un SDP `sendrecv` porque la pista ya fue añadida.
                 whatsapp_answer = await whatsapp_pc.createAnswer()
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
-                logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
+                logging.info(f"[{call_id}] Respuesta para WhatsApp generada (con pista de envío incluida).")
 
+                # Tu código de construcción manual de SDP ahora funcionará correctamente.
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                 ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                 ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
@@ -294,6 +313,8 @@ async def websocket_endpoint(websocket: WebSocket):
             logging.warning(f"El agente de la llamada {call_id_handled_by_this_ws} se desconectó. Terminando la llamada.")
             await send_call_action(call_id_handled_by_this_ws, "terminate")
         logging.info(f"Limpieza de cliente del lobby. Total: {len(lobby_clients)}")
+
+    
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
