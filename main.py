@@ -15,7 +15,6 @@ import uvicorn
 from fastapi.responses import HTMLResponse
 from aiortc.contrib.media import MediaRelay
 
-
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -200,25 +199,23 @@ async def websocket_endpoint(websocket: WebSocket):
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
 
-                # --- SOLUCIÓN CON MediaRelay ---
-                # Este es el método más robusto para puentear pistas en aiortc.
-
                 @browser_pc.on("track")
                 async def on_browser_track(track):
                     logging.info(f"[{call_id}] Pista del navegador recibida.")
-                    # Añadimos una pista a la conexión de WhatsApp que será alimentada por el relay.
-                    whatsapp_sender_track = whatsapp_pc.addTrack(relay.subscribe(track))
-                    
-                    # Guardamos el sender para poder detenerlo si es necesario.
-                    session["whatsapp_sender"] = whatsapp_sender_track
+                    if whatsapp_pc.connectionState != 'closed':
+                        whatsapp_pc.addTrack(relay.subscribe(track))
 
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
                     logging.info(f"[{call_id}] Pista de WhatsApp recibida.")
-                    # Añadimos una pista a la conexión del navegador que será alimentada por el relay.
-                    browser_pc.addTrack(relay.subscribe(track))
+                    if browser_pc.connectionState != 'closed':
+                        browser_pc.addTrack(relay.subscribe(track))
                 
-                # 1. Iniciar negociación con el navegador.
+                # --- CORRECCIÓN FINAL ---
+                # Preparamos la conexión del navegador para que espere una pista de audio bidireccional.
+                # Sin esta línea, createOffer() genera un SDP vacío sin sección de medios.
+                browser_pc.addTransceiver("audio", direction="sendrecv") ### LÍNEA CLAVE AÑADIDA ###
+                
                 browser_offer = await browser_pc.createOffer()
                 await browser_pc.setLocalDescription(browser_offer)
                 
@@ -238,7 +235,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 await browser_pc.setRemoteDescription(browser_answer)
                 logging.info(f"[{call_id}] Negociación con navegador completada.")
 
-                # 2. Ahora negociamos con WhatsApp.
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
                 
@@ -246,7 +242,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
                 logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
 
-                # 3. Tu código de construcción manual de SDP.
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                 ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                 ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
@@ -294,7 +289,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await send_call_action(call_id, "terminate")
             
     except WebSocketDisconnect as e:
-        logging.info(f"Cliente {current_websocket.client} desconectado con código: {e.code}")
+        logging.info(f"Cliente {websocket.client} desconectado con código: {e.code}")
     finally:
         lobby_clients.discard(current_websocket)
         if call_id_handled_by_this_ws and call_id_handled_by_this_ws in active_calls:
