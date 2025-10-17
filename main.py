@@ -178,19 +178,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 @browser_pc.on("track")
                 async def on_browser_track(track):
                     logging.info(f"[{call_id}] Pista del navegador recibida. Creando relay hacia WhatsApp.")
-                    # Crea una pista "proxy" que retransmite el audio del navegador
-                    # y la añade a la conexión de WhatsApp.
                     whatsapp_pc.addTrack(relay.subscribe(track))
 
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
                     logging.info(f"[{call_id}] Pista de WhatsApp recibida. Creando relay hacia el navegador.")
-                    # Crea una pista "proxy" que retransmite el audio de WhatsApp
-                    # y la añade a la conexión del navegador.
                     browser_pc.addTrack(relay.subscribe(track))
 
                 # 1. Iniciar negociación con el navegador PRIMERO
-                # Preparamos al browser_pc para que envíe el audio del micrófono Y reciba audio.
                 browser_pc.addTransceiver("audio", direction="sendrecv")
                 
                 logging.info(f"[{call_id}] Creando oferta para el navegador.")
