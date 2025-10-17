@@ -101,11 +101,21 @@ async def receive_call_notification(request: Request):
         event = call_data.get("event")
 
         if event == "connect":
+            # Esperar hasta 5 segundos por si un agente se está reconectando
+            for _ in range(5):
+                if lobby_clients:
+                    break
+                logging.info(f"Llamada {call_id} en espera, aguardando conexión de un agente...")
+                await asyncio.sleep(1)
+
+            # Si después de esperar, sigue sin haber nadie, entonces rechazar.
             if not lobby_clients:
-                logging.warning(f"Llamada {call_id} recibida, pero no hay agentes en el lobby. Rechazando.")
+                logging.warning(f"Llamada {call_id} recibida, pero no hay agentes en el lobby después de esperar. Rechazando.")
                 await send_call_action(call_id, "reject")
                 return Response(status_code=200)
+            # --- FIN DE LÓGICA MEJORADA ---
 
+            # Guardamos la información de la llamada, esperando que un agente la tome
             active_calls[call_id] = {
                 "status": "ringing",
                 "call_data": call_data,
