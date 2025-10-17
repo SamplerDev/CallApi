@@ -10,7 +10,7 @@ import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 import uvicorn
 from fastapi.responses import HTMLResponse
-from aiortc.contrib.media import MediaRelay # <-- Importación necesaria
+from aiortc.contrib.media import MediaRelay
 
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
@@ -172,22 +172,25 @@ async def websocket_endpoint(websocket: WebSocket):
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
 
-                # --- [SOLUCIÓN] USAR MediaRelay PARA EL PUENTE ---
+                # --- [SOLUCIÓN] USAR MediaRelay CORRECTAMENTE ---
                 relay = MediaRelay()
-                session["relay"] = relay
-
+                
                 @browser_pc.on("track")
                 async def on_browser_track(track):
-                    logging.info(f"[{call_id}] Pista del navegador recibida. Conectando al relay.")
-                    relay.addTrack(track)
+                    logging.info(f"[{call_id}] Pista del navegador recibida. Conectando a la salida de WhatsApp.")
+                    # La pista del navegador se convierte en la entrada del relay,
+                    # y la salida del relay se añade a la conexión de WhatsApp.
+                    whatsapp_pc.addTrack(relay.subscribe(track))
 
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
-                    logging.info(f"[{call_id}] Pista de WhatsApp recibida. Conectando al relay.")
-                    relay.addTrack(track)
+                    logging.info(f"[{call_id}] Pista de WhatsApp recibida. Conectando a la salida del navegador.")
+                    # La pista de WhatsApp se convierte en la entrada del relay,
+                    # y la salida del relay se añade a la conexión del navegador.
+                    browser_pc.addTrack(relay.subscribe(track))
 
                 # 1. Iniciar negociación con el navegador PRIMERO
-                # Preparamos al browser_pc para que envíe el audio del micrófono Y reciba el audio del relay.
+                # Preparamos al browser_pc para que envíe el audio del micrófono Y reciba audio.
                 browser_pc.addTransceiver("audio", direction="sendrecv")
                 
                 logging.info(f"[{call_id}] Creando oferta para el navegador.")
@@ -206,17 +209,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 whatsapp_pc = session["whatsapp_pc"]
                 browser_pc = session["browser_pc"]
-                relay = session["relay"]
 
                 browser_answer = RTCSessionDescription(sdp=data["sdp"], type="answer")
                 await browser_pc.setRemoteDescription(browser_answer)
                 logging.info(f"[{call_id}] Negociación con navegador completada.")
 
                 # 2. Ahora, negociar con WhatsApp
-                # Conectamos la salida del relay a un emisor en ambas conexiones.
-                whatsapp_pc.addTrack(relay.subscribe())
-                browser_pc.addTrack(relay.subscribe())
-
                 logging.info(f"[{call_id}] Iniciando negociación con WhatsApp.")
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
