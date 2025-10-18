@@ -13,18 +13,17 @@ import uvicorn
 from fastapi.responses import HTMLResponse
 from aiortc.contrib.media import MediaRelay
 
-# [NUEVO] Importaciones de Azure
-from azure.communication.identity import CommunicationIdentityClient
+# [MODIFICADO] Importación de Azure
+from azure.communication.networktraversal import CommunicationRelayClient
 
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger("aiortc").setLevel(logging.INFO)
 
-# [NUEVO] Clase para loguear paquetes de audio
+# Clase AudioLogger (sin cambios)
 class AudioLogger(MediaStreamTrack):
     kind = "audio"
-
     def __init__(self, track, source_name):
         super().__init__()
         self.track = track
@@ -32,12 +31,10 @@ class AudioLogger(MediaStreamTrack):
         self.packet_count = 0
         self.start_time = time.time()
         self.total_bytes = 0
-
     async def recv(self):
         packet = await self.track.recv()
         self.packet_count += 1
         self.total_bytes += len(packet.payload)
-        
         if self.packet_count % 50 == 0:
             elapsed = time.time() - self.start_time
             avg_size = self.total_bytes / self.packet_count
@@ -58,23 +55,19 @@ ACS_CONNECTION_STRING = os.getenv("COMMUNICATION_SERVICES_CONNECTION_STRING")
 if not all([VERIFY_TOKEN, PHONE_NUMBER_ID, ACCESS_TOKEN, ACS_CONNECTION_STRING]):
     raise ValueError("Faltan una o más variables de entorno críticas (incluida COMMUNICATION_SERVICES_CONNECTION_STRING).")
 
-# [NUEVO] Crear cliente de Azure para obtener credenciales TURN
+# [MODIFICADO] Crear cliente de Azure para obtener credenciales TURN
 try:
-    identity_client = CommunicationIdentityClient.from_connection_string(ACS_CONNECTION_STRING)
+    relay_client = CommunicationRelayClient.from_connection_string(ACS_CONNECTION_STRING)
 except Exception as e:
     logging.error(f"Error al crear el cliente de Azure Communication Services. Revisa la cadena de conexión: {e}")
     raise
 
-# --- 2. CONSTANTES Y CONFIGURACIÓN GLOBAL ---
+# ... (El resto de la configuración y funciones auxiliares se mantienen igual) ...
 WHATSAPP_API_URL = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/calls"
 HEADERS = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
-
 active_calls = {}
 lobby_clients = set()
-
 app = FastAPI(title="WhatsApp WebRTC Bridge - Final Version")
-
-# --- 3. CONFIGURACIÓN DE CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -82,13 +75,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# --- 4. FUNCIONES AUXILIARES ---
 async def send_call_action(call_id: str, action: str, sdp: str = None):
     payload = {"messaging_product": "whatsapp", "call_id": call_id, "action": action}
     if sdp:
         payload["session"] = {"sdp_type": "answer", "sdp": sdp}
-    
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(WHATSAPP_API_URL, json=payload, headers=HEADERS)
@@ -105,16 +95,12 @@ async def send_call_action(call_id: str, action: str, sdp: str = None):
         except Exception as e:
             logging.error(f"Error inesperado en send_call_action para {call_id}: {e}")
             return None
-
 async def broadcast_to_lobby(message: dict):
     for client in list(lobby_clients):
         try:
             await client.send_json(message)
         except Exception:
             lobby_clients.discard(client)
-
-# --- 5. ENDPOINTS DE LA API ---
-
 @app.get("/webhook")
 def verify_webhook(request: Request):
     if (request.query_params.get("hub.mode") == "subscribe" and
@@ -122,30 +108,24 @@ def verify_webhook(request: Request):
         logging.info("WEBHOOK VERIFICADO CON ÉXITO")
         return Response(content=request.query_params.get("hub.challenge"))
     raise HTTPException(status_code=403, detail="Verification failed.")
-
 @app.post("/webhook")
 async def receive_call_notification(request: Request):
     body = await request.json()
     logging.info("--- WEBHOOK RECIBIDO ---")
     logging.info(json.dumps(body, indent=2))
-
     try:
         call_data = body["entry"][0]["changes"][0]["value"]["calls"][0]
         call_id = call_data["id"]
         event = call_data.get("event")
-
         if event == "connect":
             if not lobby_clients:
                 logging.warning(f"Llamada {call_id} recibida, pero no hay agentes en el lobby. Rechazando.")
                 await send_call_action(call_id, "reject")
                 return Response(status_code=200)
-
             active_calls[call_id] = { "status": "ringing", "call_data": call_data }
-            
             caller_name = body["entry"][0]["changes"][0]["value"]["contacts"][0].get('profile', {}).get('name', 'Desconocido')
             await broadcast_to_lobby({ "type": "incoming_call", "call_id": call_id, "from": caller_name })
             logging.info(f"Notificando al lobby sobre la llamada entrante {call_id} de {caller_name}")
-
         elif event == "terminate":
             if call_id in active_calls:
                 session = active_calls.pop(call_id, {})
@@ -154,19 +134,15 @@ async def receive_call_notification(request: Request):
                     try:
                         await agent_ws.send_json({"type": "call_terminated", "call_id": call_id})
                     except Exception: pass
-                
                 if session.get("whatsapp_pc") and session["whatsapp_pc"].connectionState != "closed":
                     await session["whatsapp_pc"].close()
                 if session.get("browser_pc") and session["browser_pc"].connectionState != "closed":
                     await session["browser_pc"].close()
-                
                 logging.info(f"Sesión para {call_id} terminada y limpiada.")
-
     except (KeyError, IndexError) as e:
         logging.error(f"Error al parsear el webhook. Estructura inesperada: {e}", exc_info=True)
     except Exception as e:
         logging.error(f"Error inesperado al procesar el webhook: {e}", exc_info=True)
-
     return Response(status_code=200)
 
 @app.websocket("/ws")
@@ -204,16 +180,17 @@ async def websocket_endpoint(websocket: WebSocket):
                 # --- [MODIFICADO] Obtener credenciales de TURN de Azure ---
                 logging.info(f"[{call_id}] Obteniendo credenciales de TURN desde Azure Communication Services...")
                 try:
-                    token_response = identity_client.get_ice_servers()
+                    ice_servers_from_azure = relay_client.get_ice_servers()
                     ice_servers = [RTCIceServer(
                         urls=server.urls,
                         username=server.username,
                         credential=server.credential
-                    ) for server in token_response]
-                    logging.info(f"[{call_id}] Credenciales de TURN obtenidas. Usando {len(ice_servers)} servidores de Azure.")
+                    ) for server in ice_servers_from_azure]
+                    # Siempre añadir un STUN público como fallback
+                    ice_servers.append(RTCIceServer(urls="stun:stun.l.google.com:19302"))
+                    logging.info(f"[{call_id}] Credenciales de TURN obtenidas. Usando {len(ice_servers)} servidores.")
                 except Exception as e:
                     logging.error(f"[{call_id}] Falló la obtención de credenciales de TURN de Azure: {e}")
-                    # Fallback a STUN de Google si Azure falla
                     ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:19302")]
                 
                 config = RTCConfiguration(iceServers=ice_servers)
