@@ -1,5 +1,3 @@
-# main.py
-
 import os
 import json
 import logging
@@ -119,10 +117,8 @@ async def receive_call_notification(request: Request):
                         await agent_ws.send_json({"type": "call_terminated", "call_id": call_id})
                     except Exception: pass
                 
-                if session.get("whatsapp_pc") and session["whatsapp_pc"].connectionState != "closed":
-                    await session["whatsapp_pc"].close()
-                if session.get("browser_pc") and session["browser_pc"].connectionState != "closed":
-                    await session["browser_pc"].close()
+                if session.get("whatsapp_pc"): await session["whatsapp_pc"].close()
+                if session.get("browser_pc"): await session["browser_pc"].close()
                 
                 logging.info(f"Sesión para {call_id} terminada y limpiada.")
 
@@ -163,9 +159,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 session["status"] = "negotiating"
                 session["agent_websocket"] = websocket
                 call_id_handled_by_this_ws = call_id
-                
-                # [SOLUCIÓN 1/3] Crear un evento para sincronizar la llegada de la pista del navegador
-                session["browser_track_ready"] = asyncio.Event()
 
                 config = RTCConfiguration(iceServers=[
                     RTCIceServer(urls="stun:stun.l.google.com:19302"),
@@ -179,21 +172,25 @@ async def websocket_endpoint(websocket: WebSocket):
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
 
+                # --- [SOLUCIÓN] USAR MediaRelay CORRECTAMENTE ---
                 relay = MediaRelay()
-
+                
                 @browser_pc.on("track")
                 async def on_browser_track(track):
                     logging.info(f"[{call_id}] Pista del navegador recibida. Conectando a la salida de WhatsApp.")
+                    # La pista del navegador se convierte en la entrada del relay,
+                    # y la salida del relay se añade a la conexión de WhatsApp.
                     whatsapp_pc.addTrack(relay.subscribe(track))
-                    # [SOLUCIÓN 2/3] Notificar que la pista ha sido añadida (poner la luz en verde)
-                    session["browser_track_ready"].set()
 
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
                     logging.info(f"[{call_id}] Pista de WhatsApp recibida. Conectando a la salida del navegador.")
+                    # La pista de WhatsApp se convierte en la entrada del relay,
+                    # y la salida del relay se añade a la conexión del navegador.
                     browser_pc.addTrack(relay.subscribe(track))
 
                 # 1. Iniciar negociación con el navegador PRIMERO
+                # Preparamos al browser_pc para que envíe el audio del micrófono Y reciba audio.
                 browser_pc.addTransceiver("audio", direction="sendrecv")
                 
                 logging.info(f"[{call_id}] Creando oferta para el navegador.")
@@ -217,24 +214,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 await browser_pc.setRemoteDescription(browser_answer)
                 logging.info(f"[{call_id}] Negociación con navegador completada.")
 
-                # [SOLUCIÓN 3/3] Esperar a que la pista del navegador llegue antes de continuar (esperar la luz verde)
-                try:
-                    logging.info(f"[{call_id}] Esperando la pista de audio del navegador...")
-                    await asyncio.wait_for(session["browser_track_ready"].wait(), timeout=10.0)
-                    logging.info(f"[{call_id}] Pista del navegador recibida y lista.")
-                except asyncio.TimeoutError:
-                    logging.error(f"[{call_id}] Timeout: No se recibió la pista de audio del navegador en 10 segundos. Abortando.")
-                    await send_call_action(call_id, "terminate")
-                    continue
-
-                # 2. Ahora, negociar con WhatsApp (con la garantía de que la pista ya está añadida)
+                # 2. Ahora, negociar con WhatsApp
                 logging.info(f"[{call_id}] Iniciando negociación con WhatsApp.")
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
                 
                 whatsapp_answer = await whatsapp_pc.createAnswer()
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
-                logging.info(f"[{call_id}] Respuesta para WhatsApp generada (con pista de envío).")
+                logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
 
                 # 3. Construir el SDP final manualmente (necesario para WhatsApp)
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
@@ -251,7 +238,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname, msid, track_id]):
                     logging.error(f"[{call_id}] Fallo crítico en la extracción de SDP. Abortando.")
-                    await send_call_action(call_id, "terminate")
                     continue
 
                 session_id_val = int(time.time() * 1000)
