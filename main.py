@@ -13,7 +13,7 @@ import uvicorn
 from fastapi.responses import HTMLResponse
 from aiortc.contrib.media import MediaRelay
 
-# [MODIFICADO] Importación de Azure
+# Importación correcta de Azure según la documentación de PyPI
 from azure.communication.networktraversal import CommunicationRelayClient
 
 # --- 1. CONFIGURACIÓN INICIAL ---
@@ -21,7 +21,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger("aiortc").setLevel(logging.INFO)
 
-# Clase AudioLogger (sin cambios)
+# Clase para loguear paquetes de audio
 class AudioLogger(MediaStreamTrack):
     kind = "audio"
     def __init__(self, track, source_name):
@@ -37,7 +37,7 @@ class AudioLogger(MediaStreamTrack):
         self.total_bytes += len(packet.payload)
         if self.packet_count % 50 == 0:
             elapsed = time.time() - self.start_time
-            avg_size = self.total_bytes / self.packet_count
+            avg_size = self.total_bytes / self.packet_count if self.packet_count > 0 else 0
             logging.info(
                 f"[AUDIO LOG] Fuente: '{self.source_name}' | "
                 f"Paquetes: {self.packet_count} | "
@@ -55,19 +55,23 @@ ACS_CONNECTION_STRING = os.getenv("COMMUNICATION_SERVICES_CONNECTION_STRING")
 if not all([VERIFY_TOKEN, PHONE_NUMBER_ID, ACCESS_TOKEN, ACS_CONNECTION_STRING]):
     raise ValueError("Faltan una o más variables de entorno críticas (incluida COMMUNICATION_SERVICES_CONNECTION_STRING).")
 
-# [MODIFICADO] Crear cliente de Azure para obtener credenciales TURN
+# Crear cliente de Azure para obtener credenciales TURN
 try:
     relay_client = CommunicationRelayClient.from_connection_string(ACS_CONNECTION_STRING)
 except Exception as e:
     logging.error(f"Error al crear el cliente de Azure Communication Services. Revisa la cadena de conexión: {e}")
     raise
 
-# ... (El resto de la configuración y funciones auxiliares se mantienen igual) ...
+# --- 2. CONSTANTES Y CONFIGURACIÓN GLOBAL ---
 WHATSAPP_API_URL = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/calls"
 HEADERS = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
+
 active_calls = {}
 lobby_clients = set()
+
 app = FastAPI(title="WhatsApp WebRTC Bridge - Final Version")
+
+# --- 3. CONFIGURACIÓN DE CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -75,6 +79,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- 4. FUNCIONES AUXILIARES ---
 async def send_call_action(call_id: str, action: str, sdp: str = None):
     payload = {"messaging_product": "whatsapp", "call_id": call_id, "action": action}
     if sdp:
@@ -95,12 +101,16 @@ async def send_call_action(call_id: str, action: str, sdp: str = None):
         except Exception as e:
             logging.error(f"Error inesperado en send_call_action para {call_id}: {e}")
             return None
+
 async def broadcast_to_lobby(message: dict):
     for client in list(lobby_clients):
         try:
             await client.send_json(message)
         except Exception:
             lobby_clients.discard(client)
+
+# --- 5. ENDPOINTS DE LA API ---
+
 @app.get("/webhook")
 def verify_webhook(request: Request):
     if (request.query_params.get("hub.mode") == "subscribe" and
@@ -108,6 +118,7 @@ def verify_webhook(request: Request):
         logging.info("WEBHOOK VERIFICADO CON ÉXITO")
         return Response(content=request.query_params.get("hub.challenge"))
     raise HTTPException(status_code=403, detail="Verification failed.")
+
 @app.post("/webhook")
 async def receive_call_notification(request: Request):
     body = await request.json()
@@ -177,24 +188,24 @@ async def websocket_endpoint(websocket: WebSocket):
                 call_id_handled_by_this_ws = call_id
                 session["browser_track_ready"] = asyncio.Event()
 
-                # --- [MODIFICADO] Obtener credenciales de TURN de Azure ---
+                # --- [CORREGIDO] Obtener credenciales de TURN de Azure con el método correcto ---
                 logging.info(f"[{call_id}] Obteniendo credenciales de TURN desde Azure Communication Services...")
                 try:
-                    ice_servers_from_azure = relay_client.get_ice_servers()
+                    # El método correcto es get_relay_configuration()
+                    relay_config = relay_client.get_relay_configuration()
                     ice_servers = [RTCIceServer(
                         urls=server.urls,
                         username=server.username,
                         credential=server.credential
-                    ) for server in ice_servers_from_azure]
-                    # Siempre añadir un STUN público como fallback
-                    ice_servers.append(RTCIceServer(urls="stun:stun.l.google.com:19302"))
-                    logging.info(f"[{call_id}] Credenciales de TURN obtenidas. Usando {len(ice_servers)} servidores.")
+                    ) for server in relay_config.ice_servers]
+                    logging.info(f"[{call_id}] Credenciales de TURN obtenidas. Usando {len(ice_servers)} servidores de Azure.")
                 except Exception as e:
                     logging.error(f"[{call_id}] Falló la obtención de credenciales de TURN de Azure: {e}")
+                    # Fallback a STUN de Google si Azure falla
                     ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:19302")]
                 
                 config = RTCConfiguration(iceServers=ice_servers)
-                # --- FIN DE LA MODIFICACIÓN ---
+                # --- FIN DE LA CORRECCIÓN ---
                 
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 browser_pc = RTCPeerConnection(configuration=config)
@@ -232,14 +243,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif event_type == "answer_from_browser":
                 logging.info(f"[{call_id}] Recibida RESPUESTA SDP del navegador.")
-                
                 whatsapp_pc = session["whatsapp_pc"]
                 browser_pc = session["browser_pc"]
-
                 browser_answer = RTCSessionDescription(sdp=data["sdp"], type="answer")
                 await browser_pc.setRemoteDescription(browser_answer)
                 logging.info(f"[{call_id}] Negociación con navegador completada.")
-
                 try:
                     logging.info(f"[{call_id}] Esperando la pista de audio del navegador...")
                     await asyncio.wait_for(session["browser_track_ready"].wait(), timeout=10.0)
@@ -248,15 +256,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     logging.error(f"[{call_id}] Timeout: No se recibió la pista de audio del navegador en 10 segundos. Abortando.")
                     await send_call_action(call_id, "terminate")
                     continue
-
                 logging.info(f"[{call_id}] Iniciando negociación con WhatsApp.")
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
-                
                 whatsapp_answer = await whatsapp_pc.createAnswer()
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
                 logging.info(f"[{call_id}] Respuesta para WhatsApp generada (con pista de envío).")
-
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                 ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                 ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
@@ -268,12 +273,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 msid_line = next((line for line in local_sdp_lines if line.startswith("a=msid:")), None)
                 if msid_line:
                     parts = msid_line.split(); msid = parts[0].split(':')[1]; track_id = parts[1]
-
                 if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname, msid, track_id]):
                     logging.error(f"[{call_id}] Fallo crítico en la extracción de SDP. Abortando.")
                     await send_call_action(call_id, "terminate")
                     continue
-
                 session_id_val = int(time.time() * 1000)
                 final_sdp = (
                     f"v=0\r\no=- {session_id_val} 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE audio\r\n"
@@ -290,7 +293,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     f"a=ssrc:{ssrc} cname:{cname}\r\n"
                     f"a=ssrc:{ssrc} msid:{msid} {track_id}\r\n"
                 )
-                
                 pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
                 if pre_accept_response:
                     await asyncio.sleep(1)
