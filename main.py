@@ -8,24 +8,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
-from aiortc.mediastreams import MediaStreamTrack # [NUEVO] Importación necesaria
+from aiortc.mediastreams import MediaStreamTrack
 import uvicorn
 from fastapi.responses import HTMLResponse
 from aiortc.contrib.media import MediaRelay
 
+# [NUEVO] Importaciones de Azure
+from azure.communication.identity import CommunicationIdentityClient
+
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-# [MODIFICADO] Bajamos el nivel de log de aiortc para no saturar la consola con sus mensajes DEBUG.
-# Nos enfocaremos en nuestros propios logs de audio.
-logging.getLogger("aiortc").setLevel(logging.INFO) 
+logging.getLogger("aiortc").setLevel(logging.INFO)
 
-# --- [NUEVO] Clase para loguear paquetes de audio ---
+# [NUEVO] Clase para loguear paquetes de audio
 class AudioLogger(MediaStreamTrack):
-    """
-    Una pista de audio "proxy" que intercepta cada paquete, imprime su información,
-    y luego lo pasa al siguiente eslabón de la cadena (el MediaRelay).
-    """
     kind = "audio"
 
     def __init__(self, track, source_name):
@@ -37,13 +34,10 @@ class AudioLogger(MediaStreamTrack):
         self.total_bytes = 0
 
     async def recv(self):
-        # Espera el siguiente paquete de la pista original
         packet = await self.track.recv()
-        
         self.packet_count += 1
         self.total_bytes += len(packet.payload)
         
-        # Imprimir un log cada 50 paquetes (aprox. cada segundo) para no inundar la consola
         if self.packet_count % 50 == 0:
             elapsed = time.time() - self.start_time
             avg_size = self.total_bytes / self.packet_count
@@ -53,22 +47,23 @@ class AudioLogger(MediaStreamTrack):
                 f"Tamaño Promedio: {avg_size:.1f} bytes | "
                 f"Packets/sec: {self.packet_count / elapsed:.1f}"
             )
-        
-        # Devuelve el paquete original para que el audio siga fluyendo
         return packet
-
-# --- FIN DE LA NUEVA CLASE ---
-
 
 # Cargar credenciales
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
-TURN_USERNAME = os.getenv("TURN_USERNAME")
-TURN_CREDENTIAL = os.getenv("TURN_CREDENTIAL")
+ACS_CONNECTION_STRING = os.getenv("COMMUNICATION_SERVICES_CONNECTION_STRING")
 
-if not all([VERIFY_TOKEN, PHONE_NUMBER_ID, ACCESS_TOKEN, TURN_USERNAME, TURN_CREDENTIAL]):
-    raise ValueError("Faltan una o más variables de entorno críticas.")
+if not all([VERIFY_TOKEN, PHONE_NUMBER_ID, ACCESS_TOKEN, ACS_CONNECTION_STRING]):
+    raise ValueError("Faltan una o más variables de entorno críticas (incluida COMMUNICATION_SERVICES_CONNECTION_STRING).")
+
+# [NUEVO] Crear cliente de Azure para obtener credenciales TURN
+try:
+    identity_client = CommunicationIdentityClient.from_connection_string(ACS_CONNECTION_STRING)
+except Exception as e:
+    logging.error(f"Error al crear el cliente de Azure Communication Services. Revisa la cadena de conexión: {e}")
+    raise
 
 # --- 2. CONSTANTES Y CONFIGURACIÓN GLOBAL ---
 WHATSAPP_API_URL = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/calls"
@@ -160,8 +155,10 @@ async def receive_call_notification(request: Request):
                         await agent_ws.send_json({"type": "call_terminated", "call_id": call_id})
                     except Exception: pass
                 
-                if session.get("whatsapp_pc"): await session["whatsapp_pc"].close()
-                if session.get("browser_pc"): await session["browser_pc"].close()
+                if session.get("whatsapp_pc") and session["whatsapp_pc"].connectionState != "closed":
+                    await session["whatsapp_pc"].close()
+                if session.get("browser_pc") and session["browser_pc"].connectionState != "closed":
+                    await session["browser_pc"].close()
                 
                 logging.info(f"Sesión para {call_id} terminada y limpiada.")
 
@@ -204,13 +201,23 @@ async def websocket_endpoint(websocket: WebSocket):
                 call_id_handled_by_this_ws = call_id
                 session["browser_track_ready"] = asyncio.Event()
 
-                config = RTCConfiguration(
-                                                iceServers=[
-                                                    RTCIceServer(urls="stun:stun.l.google.com:19302"),
-                                                    RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
-                                                    RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
-                                                ]
-                                            )
+                # --- [MODIFICADO] Obtener credenciales de TURN de Azure ---
+                logging.info(f"[{call_id}] Obteniendo credenciales de TURN desde Azure Communication Services...")
+                try:
+                    token_response = identity_client.get_ice_servers()
+                    ice_servers = [RTCIceServer(
+                        urls=server.urls,
+                        username=server.username,
+                        credential=server.credential
+                    ) for server in token_response]
+                    logging.info(f"[{call_id}] Credenciales de TURN obtenidas. Usando {len(ice_servers)} servidores de Azure.")
+                except Exception as e:
+                    logging.error(f"[{call_id}] Falló la obtención de credenciales de TURN de Azure: {e}")
+                    # Fallback a STUN de Google si Azure falla
+                    ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:19302")]
+                
+                config = RTCConfiguration(iceServers=ice_servers)
+                # --- FIN DE LA MODIFICACIÓN ---
                 
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 browser_pc = RTCPeerConnection(configuration=config)
@@ -220,7 +227,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 relay = MediaRelay()
                 
-                # --- [MODIFICADO] Añadir logs de audio ---
                 @browser_pc.on("track")
                 async def on_browser_track(track):
                     logging.info(f"[{call_id}] Pista del navegador recibida. Envolviendo en logger y conectando a WhatsApp.")
@@ -233,7 +239,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     logging.info(f"[{call_id}] Pista de WhatsApp recibida. Envolviendo en logger y conectando al Navegador.")
                     logged_track = AudioLogger(track, "WhatsApp")
                     browser_pc.addTrack(relay.subscribe(logged_track))
-                # --- FIN DE LA MODIFICACIÓN ---
 
                 browser_pc.addTransceiver("audio", direction="sendrecv")
                 
