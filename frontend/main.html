@@ -50,8 +50,13 @@
         let currentCallId = null;
 
         function connect() {
-            // Asegúrate de que la URL coincida con tu servidor (ws:// o wss://)
-            const wsUrl = `ws://${window.location.host}/ws`;
+            // --- [SOLUCIÓN PARTE 1] ---
+            // Detectar si la página es segura (https) y usar el protocolo WebSocket seguro (wss)
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const wsUrl = `${protocol}//${window.location.host}/ws`;
+console.log(`Intentando conectar a: ${wsUrl}`);
+            // --- FIN DE LA SOLUCIÓN ---
+
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
@@ -101,7 +106,6 @@
             incomingCallDiv.style.display = 'none';
             onCallDiv.style.display = 'block';
             
-            // 1. Pedir permiso y obtener el audio del micrófono ANTES de todo
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
                 console.log("Acceso al micrófono obtenido.");
@@ -112,14 +116,12 @@
                 return;
             }
 
-            // 2. Notificar al servidor que hemos contestado
             ws.send(JSON.stringify({ type: 'answer_call', call_id: currentCallId }));
         };
 
         async function handleOfferFromServer(sdp) {
             pc = new RTCPeerConnection();
 
-            // Cuando el servidor nos envíe su audio, lo añadimos al <audio> tag
             pc.ontrack = (event) => {
                 console.log("Pista de audio remota recibida del servidor.");
                 if (audioPlayer.srcObject !== event.streams[0]) {
@@ -127,8 +129,6 @@
                 }
             };
 
-            // Añadir NUESTRA pista de audio (del micrófono) a la conexión para enviarla al servidor
-            // ESTA ES LA PARTE MÁS IMPORTANTE
             localStream.getTracks().forEach(track => {
                 console.log("Añadiendo pista de audio local a la conexión.");
                 pc.addTrack(track, localStream);
@@ -138,7 +138,6 @@
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
 
-            // Enviar nuestra respuesta de vuelta al servidor
             ws.send(JSON.stringify({
                 type: 'answer_from_browser',
                 call_id: currentCallId,
