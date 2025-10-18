@@ -209,8 +209,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                                     RTCIceServer(urls="stun:stun.l.google.com:19302"),
                                                     RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
                                                     RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
-                                                ],
-                                                iceTransportPolicy="relay"  # <-- AÑADE ESTA LÍNEA
+                                                ]
                                             )
                 
                 whatsapp_pc = RTCPeerConnection(configuration=config)
