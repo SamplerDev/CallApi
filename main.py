@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
+from aiortc.mediastreams import MediaStreamTrack # [NUEVO] Importación necesaria
 import uvicorn
 from fastapi.responses import HTMLResponse
 from aiortc.contrib.media import MediaRelay
@@ -15,7 +16,49 @@ from aiortc.contrib.media import MediaRelay
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logging.getLogger("aiortc").setLevel(logging.DEBUG)
+# [MODIFICADO] Bajamos el nivel de log de aiortc para no saturar la consola con sus mensajes DEBUG.
+# Nos enfocaremos en nuestros propios logs de audio.
+logging.getLogger("aiortc").setLevel(logging.INFO) 
+
+# --- [NUEVO] Clase para loguear paquetes de audio ---
+class AudioLogger(MediaStreamTrack):
+    """
+    Una pista de audio "proxy" que intercepta cada paquete, imprime su información,
+    y luego lo pasa al siguiente eslabón de la cadena (el MediaRelay).
+    """
+    kind = "audio"
+
+    def __init__(self, track, source_name):
+        super().__init__()
+        self.track = track
+        self.source_name = source_name
+        self.packet_count = 0
+        self.start_time = time.time()
+        self.total_bytes = 0
+
+    async def recv(self):
+        # Espera el siguiente paquete de la pista original
+        packet = await self.track.recv()
+        
+        self.packet_count += 1
+        self.total_bytes += len(packet.payload)
+        
+        # Imprimir un log cada 50 paquetes (aprox. cada segundo) para no inundar la consola
+        if self.packet_count % 50 == 0:
+            elapsed = time.time() - self.start_time
+            avg_size = self.total_bytes / self.packet_count
+            logging.info(
+                f"[AUDIO LOG] Fuente: '{self.source_name}' | "
+                f"Paquetes: {self.packet_count} | "
+                f"Tamaño Promedio: {avg_size:.1f} bytes | "
+                f"Packets/sec: {self.packet_count / elapsed:.1f}"
+            )
+        
+        # Devuelve el paquete original para que el audio siga fluyendo
+        return packet
+
+# --- FIN DE LA NUEVA CLASE ---
+
 
 # Cargar credenciales
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
@@ -159,6 +202,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 session["status"] = "negotiating"
                 session["agent_websocket"] = websocket
                 call_id_handled_by_this_ws = call_id
+                session["browser_track_ready"] = asyncio.Event()
 
                 config = RTCConfiguration(iceServers=[
                     RTCIceServer(urls="stun:stun.l.google.com:19302"),
@@ -172,25 +216,23 @@ async def websocket_endpoint(websocket: WebSocket):
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
 
-                # --- [SOLUCIÓN] USAR MediaRelay CORRECTAMENTE ---
                 relay = MediaRelay()
                 
+                # --- [MODIFICADO] Añadir logs de audio ---
                 @browser_pc.on("track")
                 async def on_browser_track(track):
-                    logging.info(f"[{call_id}] Pista del navegador recibida. Conectando a la salida de WhatsApp.")
-                    # La pista del navegador se convierte en la entrada del relay,
-                    # y la salida del relay se añade a la conexión de WhatsApp.
-                    whatsapp_pc.addTrack(relay.subscribe(track))
+                    logging.info(f"[{call_id}] Pista del navegador recibida. Envolviendo en logger y conectando a WhatsApp.")
+                    logged_track = AudioLogger(track, "Navegador")
+                    whatsapp_pc.addTrack(relay.subscribe(logged_track))
+                    session["browser_track_ready"].set()
 
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
-                    logging.info(f"[{call_id}] Pista de WhatsApp recibida. Conectando a la salida del navegador.")
-                    # La pista de WhatsApp se convierte en la entrada del relay,
-                    # y la salida del relay se añade a la conexión del navegador.
-                    browser_pc.addTrack(relay.subscribe(track))
+                    logging.info(f"[{call_id}] Pista de WhatsApp recibida. Envolviendo en logger y conectando al Navegador.")
+                    logged_track = AudioLogger(track, "WhatsApp")
+                    browser_pc.addTrack(relay.subscribe(logged_track))
+                # --- FIN DE LA MODIFICACIÓN ---
 
-                # 1. Iniciar negociación con el navegador PRIMERO
-                # Preparamos al browser_pc para que envíe el audio del micrófono Y reciba audio.
                 browser_pc.addTransceiver("audio", direction="sendrecv")
                 
                 logging.info(f"[{call_id}] Creando oferta para el navegador.")
@@ -214,16 +256,23 @@ async def websocket_endpoint(websocket: WebSocket):
                 await browser_pc.setRemoteDescription(browser_answer)
                 logging.info(f"[{call_id}] Negociación con navegador completada.")
 
-                # 2. Ahora, negociar con WhatsApp
+                try:
+                    logging.info(f"[{call_id}] Esperando la pista de audio del navegador...")
+                    await asyncio.wait_for(session["browser_track_ready"].wait(), timeout=10.0)
+                    logging.info(f"[{call_id}] Pista del navegador recibida y lista.")
+                except asyncio.TimeoutError:
+                    logging.error(f"[{call_id}] Timeout: No se recibió la pista de audio del navegador en 10 segundos. Abortando.")
+                    await send_call_action(call_id, "terminate")
+                    continue
+
                 logging.info(f"[{call_id}] Iniciando negociación con WhatsApp.")
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
                 
                 whatsapp_answer = await whatsapp_pc.createAnswer()
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
-                logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
+                logging.info(f"[{call_id}] Respuesta para WhatsApp generada (con pista de envío).")
 
-                # 3. Construir el SDP final manualmente (necesario para WhatsApp)
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                 ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                 ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
@@ -238,6 +287,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname, msid, track_id]):
                     logging.error(f"[{call_id}] Fallo crítico en la extracción de SDP. Abortando.")
+                    await send_call_action(call_id, "terminate")
                     continue
 
                 session_id_val = int(time.time() * 1000)
