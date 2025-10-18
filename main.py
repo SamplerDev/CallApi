@@ -204,11 +204,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 call_id_handled_by_this_ws = call_id
                 session["browser_track_ready"] = asyncio.Event()
 
-                config = RTCConfiguration(iceServers=[
-                    RTCIceServer(urls="stun:stun.l.google.com:19302"),
-                    RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
-                    RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
-                ])
+                config = RTCConfiguration(
+                                                iceServers=[
+                                                    RTCIceServer(urls="stun:stun.l.google.com:19302"),
+                                                    RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
+                                                    RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
+                                                ],
+                                                iceTransportPolicy="relay"  # <-- AÑADE ESTA LÍNEA
+                                            )
                 
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 browser_pc = RTCPeerConnection(configuration=config)
