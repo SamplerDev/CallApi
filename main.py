@@ -152,81 +152,128 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             elif event_type == "answer_call":
-                    if session.get("status") != "ringing":
-                        logging.warning(f"[{call_id}] Intento de contestar llamada ya tomada.")
-                        await websocket.send_json({"type": "call_already_taken"})
-                        continue
+                if session.get("status") != "ringing":
+                    logging.warning(f"[{call_id}] Intento de contestar llamada ya tomada.")
+                    await websocket.send_json({"type": "call_already_taken"})
+                    continue
 
-                    logging.info(f"[{call_id}] Agente ha contestado. Iniciando negociación de puente.")
-                    
-                    session["status"] = "negotiating"
-                    session["agent_websocket"] = websocket
-                    call_id_handled_by_this_ws = call_id
+                logging.info(f"[{call_id}] Agente ha contestado. Iniciando negociación de puente.")
+                
+                session["status"] = "negotiating"
+                session["agent_websocket"] = websocket
+                call_id_handled_by_this_ws = call_id
 
-                    config = RTCConfiguration(iceServers=[
-                        RTCIceServer(urls="stun:stun.l.google.com:19302"),
-                        RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
-                        RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
-                    ])
-                    
-                    whatsapp_pc = RTCPeerConnection(configuration=config)
-                    browser_pc = RTCPeerConnection(configuration=config)
-                    
-                    session["whatsapp_pc"] = whatsapp_pc
-                    session["browser_pc"] = browser_pc
-                    session["whatsapp_sender"] = None
-                    session["browser_sender"] = None
+                config = RTCConfiguration(iceServers=[
+                    RTCIceServer(urls="stun:stun.l.google.com:19302"),
+                    RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
+                    RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
+                ])
+                
+                whatsapp_pc = RTCPeerConnection(configuration=config)
+                browser_pc = RTCPeerConnection(configuration=config)
+                
+                # Crear relay para audio
+                relay = MediaRelay()
+                
+                session["whatsapp_pc"] = whatsapp_pc
+                session["browser_pc"] = browser_pc
+                session["relay"] = relay
+                session["whatsapp_sender"] = None
+                session["browser_sender"] = None
+                session["media_stats"] = {
+                    "whatsapp_packets_received": 0,
+                    "browser_packets_received": 0,
+                    "last_check_time": time.time()
+                }
+                session["monitor_task"] = None
 
-                    # AGREGAR TRANSCEIVERS ANTES DE CREAR OFFER
-                    browser_pc.addTransceiver("audio", direction="sendrecv")
+                # CORRECCIÓN 1: Transceptores con direcciones correctas
+                browser_trx = browser_pc.addTransceiver("audio", direction="recvonly")
+                whatsapp_trx = whatsapp_pc.addTransceiver("audio", direction="sendrecv")
+
+                # CORRECCIÓN 2: Guardar transceptores en session para acceso posterior
+                session["browser_trx"] = browser_trx
+                session["whatsapp_trx"] = whatsapp_trx
+
+                # ===== MANEJADORES DE PISTA CON MEDIARELAY =====
+                @browser_pc.on("track")
+                async def on_browser_track(track):
+                    logging.info(f"[{call_id}] PISTA DEL NAVEGADOR: kind={track.kind}, id={track.id}")
                     
-                    # ===== NUEVOS HANDLERS CON LOGGING DIAGNÓSTICO =====
-                    @browser_pc.on("track")
-                    async def on_browser_track(track):
-                        logging.info(f"[{call_id}] Track recibido: kind={track.kind}, id={track.id}")
-                        
-                        if track.kind == "audio":
-                            sender = whatsapp_pc.addTrack(track)
+                    if track.kind == "audio":
+                        try:
+                            relay = session["relay"]
+                            relay_track = relay.subscribe(track)
+                            logging.info(f"[{call_id}] Track del navegador suscrito al relay")
+                            
+                            whatsapp_trx = session["whatsapp_trx"]
+                            sender = whatsapp_trx.sender
+                            await sender.replaceTrack(relay_track)
                             session["whatsapp_sender"] = sender
+                            logging.info(f"[{call_id}] Audio del navegador será enviado a WhatsApp")
                             
-                            # DEBUG: Contar frames reales
-                            frame_count = [0]  # Usar lista para mutation en closure
-                            
+                            frame_count = [0]
                             @track.on("frame")
                             async def on_frame(frame):
                                 frame_count[0] += 1
+                                session["media_stats"]["browser_packets_received"] += 1
                                 if frame_count[0] % 50 == 0:
-                                    logging.info(f"[{call_id}] FRAMES RECIBIDOS DEL NAVEGADOR: {frame_count[0]}")
+                                    logging.info(f"[{call_id}] Frames navegador: {frame_count[0]}")
                             
-                            logging.info(f"[{call_id}] ✅ Audio del navegador agregado a WhatsApp")
+                        except Exception as e:
+                            logging.error(f"[{call_id}] Error procesando audio del navegador: {e}", exc_info=True)
 
-                    @whatsapp_pc.on("track")
-                    async def on_whatsapp_track(track):
-                        logging.info(f"[{call_id}] Track de WhatsApp recibido: kind={track.kind}, id={track.id}")
-                        if track.kind == "audio":
-                            sender = browser_pc.addTrack(track)
-                            session["browser_sender"] = sender
-                            logging.info(f"[{call_id}] Audio de WhatsApp agregado al navegador. Sender: {sender}")
-
-                    # Monitorear estado de conexión
-                    @whatsapp_pc.on("connectionstatechange")
-                    async def on_connection_state_change():
-                        logging.info(f"[{call_id}] Estado conexión WhatsApp: {whatsapp_pc.connectionState}")
-                        if whatsapp_pc.connectionState == "failed":
-                            logging.error(f"[{call_id}] Conexión WhatsApp FALLÓ")
-                    # ===== FIN DE NUEVOS HANDLERS =====
-
-                    logging.info(f"[{call_id}] Creando oferta para el navegador.")
-                    browser_offer = await browser_pc.createOffer()
-                    await browser_pc.setLocalDescription(browser_offer)
+                @whatsapp_pc.on("track")
+                async def on_whatsapp_track(track):
+                    logging.info(f"[{call_id}] PISTA DE WHATSAPP: kind={track.kind}, id={track.id}")
                     
-                    logging.info(f"[{call_id}] Enviando oferta al navegador.")
-                    await websocket.send_json({
-                        "type": "offer_from_server",
-                        "call_id": call_id,
-                        "sdp": browser_pc.localDescription.sdp
-                    })
+                    if track.kind == "audio":
+                        try:
+                            relay = session["relay"]
+                            relay_track = relay.subscribe(track)
+                            logging.info(f"[{call_id}] Track de WhatsApp suscrito al relay")
+                            
+                            browser_trx = session["browser_trx"]
+                            sender = browser_trx.sender
+                            await sender.replaceTrack(relay_track)
+                            session["browser_sender"] = sender
+                            logging.info(f"[{call_id}] Audio de WhatsApp será enviado al navegador")
+                            
+                            frame_count = [0]
+                            @track.on("frame")
+                            async def on_frame(frame):
+                                frame_count[0] += 1
+                                session["media_stats"]["whatsapp_packets_received"] += 1
+                                if frame_count[0] % 50 == 0:
+                                    logging.info(f"[{call_id}] Frames WhatsApp: {frame_count[0]}")
+                            
+                        except Exception as e:
+                            logging.error(f"[{call_id}] Error procesando audio de WhatsApp: {e}", exc_info=True)
+
+                @whatsapp_pc.on("connectionstatechange")
+                async def on_connection_state_change():
+                    state = whatsapp_pc.connectionState
+                    logging.info(f"[{call_id}] Estado conexión WhatsApp: {state}")
+                    if state == "failed":
+                        logging.error(f"[{call_id}] CONEXIÓN WHATSAPP FALLIDA")
+
+                @browser_pc.on("connectionstatechange")
+                async def on_connection_state_change_browser():
+                    state = browser_pc.connectionState
+                    logging.info(f"[{call_id}] Estado conexión Navegador: {state}")
+                    if state == "failed":
+                        logging.error(f"[{call_id}] CONEXIÓN NAVEGADOR FALLIDA")
+
+                logging.info(f"[{call_id}] Creando oferta para el navegador.")
+                browser_offer = await browser_pc.createOffer()
+                await browser_pc.setLocalDescription(browser_offer)
                 
+                logging.info(f"[{call_id}] Enviando oferta al navegador.")
+                await websocket.send_json({
+                    "type": "offer_from_server",
+                    "call_id": call_id,
+                    "sdp": browser_pc.localDescription.sdp
+                })
 
             elif event_type == "answer_from_browser":
                 logging.info(f"[{call_id}] Recibida RESPUESTA SDP del navegador.")
@@ -246,9 +293,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
                 logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
 
-                
-            
-                logging.info(f"[{call_id}] Construyendo SDP final a partir de la respuesta de aiortc...")
                 source_sdp = whatsapp_pc.localDescription.sdp
                 source_lines = source_sdp.splitlines()
 
@@ -262,7 +306,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 ssrc = ssrc_parts[0].split(':')[1]
                 cname = ssrc_parts[1].split('cname:')[1]
 
-                # Extraer MSID y Track ID de la línea a=msid (no de la línea ssrc)
                 msid_line = next(line for line in source_lines if line.startswith("a=msid:"))
                 msid_parts = msid_line.split()
                 msid = msid_parts[0].split(':')[1]
@@ -296,8 +339,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 ])
                 final_sdp = "\r\n".join(final_sdp_lines) + "\r\n"
 
-            
-
                 logging.info(f"[{call_id}] SDP final con candidatos ICE:\n{final_sdp}")
                 
                 pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
@@ -305,13 +346,41 @@ async def websocket_endpoint(websocket: WebSocket):
                     await asyncio.sleep(1)
                     await send_call_action(call_id, "accept", final_sdp)
                     session["status"] = "active"
-                    logging.info(f"[{call_id}] Puente WebRTC completado y activo.")
+                    logging.info(f"[{call_id}] Puente WebRTC activo - Iniciando monitoreo de media")
+                    
+                    # CORRECCIÓN 3: Monitoreo de media inicia cuando status = "active"
+                    async def monitor_media_flow():
+                        check_interval = 5
+                        timeout_threshold = 15
+                        
+                        while call_id in active_calls and session.get("status") == "active":
+                            await asyncio.sleep(check_interval)
+                            
+                            stats = session["media_stats"]
+                            whatsapp_rx = stats["whatsapp_packets_received"]
+                            browser_rx = stats["browser_packets_received"]
+                            
+                            logging.info(f"[{call_id}] CHEQUEO MEDIA: WhatsApp RX={whatsapp_rx}, Navegador RX={browser_rx}")
+                            
+                            if whatsapp_rx == 0 or browser_rx == 0:
+                                time_elapsed = time.time() - stats["last_check_time"]
+                                if time_elapsed > timeout_threshold:
+                                    logging.error(f"[{call_id}] TIMEOUT MEDIA: WhatsApp RX={whatsapp_rx}, Navegador RX={browser_rx}")
+                                    logging.error(f"[{call_id}] No hay media fluyendo después de {timeout_threshold}s")
+                                    await send_call_action(call_id, "terminate")
+                                    return
+                            else:
+                                stats["last_check_time"] = time.time()
+                                logging.info(f"[{call_id}] Media fluyendo correctamente en ambas direcciones")
+
+                    session["monitor_task"] = asyncio.create_task(monitor_media_flow())
                 else:
-                    logging.error(f"[{call_id}] Falló el pre_accept.")        
+                    logging.error(f"[{call_id}] Error en pre_accept")
+
             elif event_type == "hangup_from_browser":
                 if call_id in active_calls:
                     await send_call_action(call_id, "terminate")
-            
+
     except WebSocketDisconnect as e:
         logging.info(f"Cliente desconectado con código: {e.code}")
     finally:
