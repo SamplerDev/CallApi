@@ -21,13 +21,6 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger("aiortc").setLevel(logging.INFO)
 
-loaded_connection_string = os.getenv("COMMUNICATION_SERVICES_CONNECTION_STRING")
-if loaded_connection_string:
-    # Imprime solo una parte para no exponer la clave completa en los logs
-    
-    logging.info(f"VERIFICACIÓN: Cadena de conexión cargada. Endpoint: {loaded_connection_string}")
-else:
-    logging.error("VERIFICACIÓN: ¡ERROR! La variable COMMUNICATION_SERVICES_CONNECTION_STRING no se encontró o está vacía.")
 
 
 # Clase para loguear paquetes de audio
