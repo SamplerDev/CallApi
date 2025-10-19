@@ -294,58 +294,68 @@ async def websocket_endpoint(websocket: WebSocket):
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
                 
+                # 1. Dejar que aiortc genere la respuesta internamente
                 whatsapp_answer = await whatsapp_pc.createAnswer()
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
-                logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
+                logging.info(f"[{call_id}] Respuesta interna de aiortc generada.")
 
+                # 2. Extraer de forma segura los valores del SDP generado
                 source_sdp = whatsapp_pc.localDescription.sdp
                 source_lines = source_sdp.splitlines()
 
-                ice_ufrag = next(line.split(':', 1)[1] for line in source_lines if line.startswith("a=ice-ufrag:"))
-                ice_pwd = next(line.split(':', 1)[1] for line in source_lines if line.startswith("a=ice-pwd:"))
-                fingerprint_line = next(line for line in source_lines if line.startswith("a=fingerprint:sha-256"))
+                def find_line(prefix, lines):
+                    for line in lines:
+                        if line.startswith(prefix):
+                            return line
+                    return None
+
+                # Extraer valores dinámicos de forma robusta
+                ice_ufrag = find_line("a=ice-ufrag:", source_lines).split(':', 1)[1]
+                ice_pwd = find_line("a=ice-pwd:", source_lines).split(':', 1)[1]
+                fingerprint_line = find_line("a=fingerprint:sha-256", source_lines)
                 fingerprint = fingerprint_line.split(' ', 1)[1]
+                
+                # La línea m= en la respuesta solo tendrá el códec seleccionado
+                m_line = find_line("m=audio", source_lines)
+                selected_payload_type = m_line.split()[3]
 
-                ssrc_line = next(line for line in source_lines if line.startswith("a=ssrc:") and "cname:" in line)
-                ssrc_parts = ssrc_line.split()
-                ssrc = ssrc_parts[0].split(':')[1]
-                cname = ssrc_parts[1].split('cname:')[1]
+                # Buscar el rtpmap y fmtp solo para el códec seleccionado
+                rtpmap_line = find_line(f"a=rtpmap:{selected_payload_type}", source_lines)
+                fmtp_line = find_line(f"a=fmtp:{selected_payload_type}", source_lines)
 
-                msid_line = next(line for line in source_lines if line.startswith("a=msid:"))
-                msid_parts = msid_line.split()
-                msid = msid_parts[0].split(':')[1]
-                track_id = msid_parts[1]
-
-                m_line = next(line for line in source_lines if line.startswith("m=audio"))
-                payload_types = m_line.split()[3:]
-
-                rtpmap_lines = [line for pt in payload_types for line in source_lines if line.startswith(f"a=rtpmap:{pt}")]
-                fmtp_lines = [line for pt in payload_types for line in source_lines if line.startswith(f"a=fmtp:{pt}")]
+                # Extraer todos los candidatos ICE
                 ice_candidates = [line for line in source_lines if line.startswith("a=candidate:")]
 
+                # 3. Construir el SDP final usando la plantilla que WhatsApp acepta
                 session_id_val = int(time.time() * 1000)
                 final_sdp_lines = [
-                    "v=0", f"o=- {session_id_val} 2 IN IP4 127.0.0.1", "s=-", "t=0 0",
-                    "a=group:BUNDLE audio", f"a=msid-semantic: WMS {msid}",
-                    f"m=audio 9 UDP/TLS/RTP/SAVPF {' '.join(payload_types)}",
-                    "c=IN IP4 0.0.0.0", "a=rtcp:9 IN IP4 0.0.0.0",
-                    f"a=ice-ufrag:{ice_ufrag}", f"a=ice-pwd:{ice_pwd}",
+                    "v=0",
+                    f"o=- {session_id_val} 2 IN IP4 127.0.0.1",
+                    "s=-",
+                    "t=0 0",
+                    "a=group:BUNDLE audio",
+                    # La línea m= debe ser compatible con lo que espera WhatsApp
+                    f"m=audio 9 UDP/TLS/RTP/SAVPF {selected_payload_type}",
+                    "c=IN IP4 0.0.0.0",
+                    "a=rtcp:9 IN IP4 0.0.0.0",
+                    f"a=ice-ufrag:{ice_ufrag}",
+                    f"a=ice-pwd:{ice_pwd}",
                 ]
                 final_sdp_lines.extend(ice_candidates)
                 final_sdp_lines.extend([
-                    f"a=fingerprint:sha-256 {fingerprint}", "a=setup:active", "a=mid:audio",
-                    "a=sendrecv", "a=rtcp-mux",
+                    f"a=fingerprint:sha-256 {fingerprint}",
+                    "a=setup:active", # Importante para tomar el rol activo en DTLS
+                    "a=mid:audio",
+                    "a=sendrecv", # ¡CRÍTICO! Asegura que el audio es bidireccional
+                    "a=rtcp-mux",
+                    rtpmap_line,
                 ])
-                final_sdp_lines.extend(rtpmap_lines)
-                final_sdp_lines.extend(fmtp_lines)
-                final_sdp_lines.extend([
-                    f"a=ssrc:{ssrc} cname:{cname}",
-                    f"a=ssrc:{ssrc} msid:{msid} {track_id}",
-                ])
+                if fmtp_line: # El fmtp es opcional
+                    final_sdp_lines.append(fmtp_line)
+
                 final_sdp = "\r\n".join(final_sdp_lines) + "\r\n"
 
-                logging.info(f"[{call_id}] SDP final con candidatos ICE:\n{final_sdp}")
-                
+                logging.info(f"[{call_id}] SDP final reconstruido para WhatsApp:\n{final_sdp}")
                 pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
                 if pre_accept_response:
                     await asyncio.sleep(1)
