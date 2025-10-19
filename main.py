@@ -131,12 +131,13 @@ async def receive_call_notification(request: Request):
                 if session.get("monitor_task"):
                     session["monitor_task"].cancel()
                 
+                # CORRECCIÓN: Usar ._file para acceder al nombre del archivo
                 if session.get("whatsapp_recorder"):
                     await session["whatsapp_recorder"].stop()
-                    logging.info(f"Grabación de WhatsApp guardada en {session['whatsapp_recorder'].file}")
+                    logging.info(f"Grabación de WhatsApp guardada en {session['whatsapp_recorder']._file}")
                 if session.get("browser_recorder"):
                     await session["browser_recorder"].stop()
-                    logging.info(f"Grabación del navegador guardada en {session['browser_recorder'].file}")
+                    logging.info(f"Grabación del navegador guardada en {session['browser_recorder']._file}")
 
                 if session.get("whatsapp_pc"):
                     await session["whatsapp_pc"].close()
@@ -222,7 +223,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 browser_pc.addTransceiver("audio", direction="sendrecv")
                 whatsapp_pc.addTransceiver("audio", direction="sendrecv")
 
-                # MODIFICADO: Lógica de on_track simplificada y corregida
+                # CORRECCIÓN: Lógica de on_track para evitar condiciones de carrera
                 @browser_pc.on("track")
                 async def on_browser_track(track):
                     logging.info(f"[{call_id}] PISTA DEL NAVEGADOR RECIBIDA: kind={track.kind}")
@@ -230,12 +231,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         # Puenteo: Enviar audio del navegador a WhatsApp
                         whatsapp_pc.addTrack(relay.subscribe(track))
                         
-                        # Grabación y conteo: Crear una suscripción separada para esto
-                        track_for_recording = relay.subscribe(track)
-                        session["browser_recorder"].addTrack(track_for_recording)
+                        # Grabación y conteo: Crear una suscripción separada
+                        track_for_recorder = relay.subscribe(track)
+                        session["browser_recorder"].addTrack(track_for_recorder)
                         await session["browser_recorder"].start()
                         
-                        @track_for_recording.on("frame")
+                        @track_for_recorder.on("frame")
                         async def on_frame(frame):
                             session["media_stats"]["browser_packets_received"] += 1
                         
@@ -249,11 +250,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         browser_pc.addTrack(relay.subscribe(track))
 
                         # Grabación y conteo: Crear una suscripción separada
-                        track_for_recording = relay.subscribe(track)
-                        session["whatsapp_recorder"].addTrack(track_for_recording)
+                        track_for_recorder = relay.subscribe(track)
+                        session["whatsapp_recorder"].addTrack(track_for_recorder)
                         await session["whatsapp_recorder"].start()
 
-                        @track_for_recording.on("frame")
+                        @track_for_recorder.on("frame")
                         async def on_frame(frame):
                             session["media_stats"]["whatsapp_packets_received"] += 1
                         
@@ -344,7 +345,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     session["status"] = "active"
                     logging.info(f"[{call_id}] Puente WebRTC activo - Iniciando monitoreo de media")
                     
-                    # MODIFICADO: Tarea de monitoreo simplificada
                     async def monitor_media_flow():
                         check_interval = 5
                         timeout_threshold = 15
