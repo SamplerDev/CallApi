@@ -188,14 +188,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 session["monitor_task"] = None
 
                 # CORRECCIÓN 1: Transceptores con direcciones correctas
-                browser_trx = browser_pc.addTransceiver("audio", direction="recvonly")
-                whatsapp_trx = whatsapp_pc.addTransceiver("audio", direction="sendrecv")
+                # CORRECTO:
+                browser_trx = browser_pc.addTransceiver("audio", direction="sendonly")    # Enviamos AL navegador
+                whatsapp_trx = whatsapp_pc.addTransceiver("audio", direction="recvonly")  # RECIBIMOS DE WhatsApp
 
                 # CORRECCIÓN 2: Guardar transceptores en session para acceso posterior
                 session["browser_trx"] = browser_trx
                 session["whatsapp_trx"] = whatsapp_trx
 
                 # ===== MANEJADORES DE PISTA CON MEDIARELAY =====
+
                 @browser_pc.on("track")
                 async def on_browser_track(track):
                     logging.info(f"[{call_id}] PISTA DEL NAVEGADOR: kind={track.kind}, id={track.id}")
@@ -250,6 +252,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             
                         except Exception as e:
                             logging.error(f"[{call_id}] Error procesando audio de WhatsApp: {e}", exc_info=True)
+        
 
                 @whatsapp_pc.on("connectionstatechange")
                 async def on_connection_state_change():
