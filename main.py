@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from fastapi import FastAPI, Request, Response, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from dotenv import load_dotenv
 import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
