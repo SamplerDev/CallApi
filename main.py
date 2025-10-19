@@ -183,16 +183,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     # ===== NUEVOS HANDLERS CON LOGGING DIAGNÓSTICO =====
                     @browser_pc.on("track")
                     async def on_browser_track(track):
-                        logging.info(f"[{call_id}] Track del navegador recibido: kind={track.kind}, id={track.id}")
+                        logging.info(f"[{call_id}] Track recibido: kind={track.kind}, enabled={track.enabled}")
+                        
                         if track.kind == "audio":
                             sender = whatsapp_pc.addTrack(track)
                             session["whatsapp_sender"] = sender
-                            logging.info(f"[{call_id}] Audio del navegador agregado a WhatsApp. Sender: {sender}")
                             
-                            # Verificar datos de frame
+                            # DEBUG: Contar frames reales
+                            frame_count = [0]  # Usar lista para mutation en closure
+                            
                             @track.on("frame")
                             async def on_frame(frame):
-                                logging.debug(f"[{call_id}] Frame recibido del navegador: {frame.size} bytes")
+                                frame_count[0] += 1
+                                if frame_count[0] % 50 == 0:
+                                    logging.info(f"[{call_id}] FRAMES RECIBIDOS DEL NAVEGADOR: {frame_count[0]}")
+                            
+                            logging.info(f"[{call_id}] ✅ Audio del navegador agregado a WhatsApp")
 
                     @whatsapp_pc.on("track")
                     async def on_whatsapp_track(track):
@@ -203,24 +209,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             logging.info(f"[{call_id}] Audio de WhatsApp agregado al navegador. Sender: {sender}")
 
                     # Monitorear estado de conexión
-                    @whatsapp_pc.on("connectionstatechange")
-                    async def on_connection_state_change():
-                        logging.info(f"[{call_id}] Estado conexión WhatsApp: {whatsapp_pc.connectionState}")
-                        if whatsapp_pc.connectionState == "failed":
-                            logging.error(f"[{call_id}] Conexión WhatsApp FALLÓ")
-                    # ===== FIN DE NUEVOS HANDLERS =====
-
-                    logging.info(f"[{call_id}] Creando oferta para el navegador.")
-                    browser_offer = await browser_pc.createOffer()
-                    await browser_pc.setLocalDescription(browser_offer)
                     
-                    logging.info(f"[{call_id}] Enviando oferta al navegador.")
-                    await websocket.send_json({
-                        "type": "offer_from_server",
-                        "call_id": call_id,
-                        "sdp": browser_pc.localDescription.sdp
-                    })
-                
 
             elif event_type == "answer_from_browser":
                 logging.info(f"[{call_id}] Recibida RESPUESTA SDP del navegador.")
@@ -325,6 +314,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 ])
                 
                 final_sdp = "\r\n".join(final_sdp_lines)
+
+                logging.info(f"--- SDP GENERADO POR AIORTC ---\n{whatsapp_pc.localDescription.sdp}")
+                logging.info(f"--- SDP ARMADO MANUALMENTE ---\n{final_sdp}")
+
                 logging.info(f"[{call_id}] SDP final con candidatos ICE:\n{final_sdp}")
                 
                 pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
