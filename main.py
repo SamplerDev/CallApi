@@ -171,31 +171,31 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 browser_pc = RTCPeerConnection(configuration=config)
-                relay = MediaRelay()
                 
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
-                session["relay"] = relay
+                session["whatsapp_sender"] = None
+                session["browser_sender"] = None
 
                 @browser_pc.on("track")
                 async def on_browser_track(track):
-                    logging.info(f"[{call_id}] Track de AUDIO del navegador recibido. Tipo: {track.kind}")
+                    logging.info(f"[{call_id}] Track de AUDIO del navegador recibido.")
                     if track.kind == "audio":
-                        # Suscribirse al relay y agregar a WhatsApp
-                        relay_track = relay.subscribe(track)
-                        whatsapp_pc.addTrack(relay_track)
-                        logging.info(f"[{call_id}] Track del navegador reenviado a WhatsApp")
+                        # Directamente agregar a WhatsApp sin relay
+                        sender = whatsapp_pc.addTrack(track)
+                        session["whatsapp_sender"] = sender
+                        logging.info(f"[{call_id}] Track del navegador agregado DIRECTAMENTE a WhatsApp")
 
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
-                    logging.info(f"[{call_id}] Track de AUDIO de WhatsApp recibido. Tipo: {track.kind}")
+                    logging.info(f"[{call_id}] Track de AUDIO de WhatsApp recibido.")
                     if track.kind == "audio":
-                        # Suscribirse al relay y agregar al navegador
-                        relay_track = relay.subscribe(track)
-                        browser_pc.addTrack(relay_track)
-                        logging.info(f"[{call_id}] Track de WhatsApp reenviado al navegador")
+                        # Directamente agregar al navegador sin relay
+                        sender = browser_pc.addTrack(track)
+                        session["browser_sender"] = sender
+                        logging.info(f"[{call_id}] Track de WhatsApp agregado DIRECTAMENTE al navegador")
 
-                # Preparar transceiver ANTES de crear oferta
+                # Agregar transceiver para que browser_pc esté listo para recibir
                 browser_pc.addTransceiver("audio", direction="sendrecv")
                 
                 logging.info(f"[{call_id}] Creando oferta para el navegador.")
@@ -208,7 +208,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     "call_id": call_id,
                     "sdp": browser_pc.localDescription.sdp
                 })
-
             
 
             elif event_type == "answer_from_browser":
