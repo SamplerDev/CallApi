@@ -1,5 +1,3 @@
-# --- START OF FINAL CORRECTED FILE main.py ---
-
 import os
 import json
 import logging
@@ -173,9 +171,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     "status": "negotiating",
                     "agent_websocket": websocket,
                     "monitor_task": None,
+                    # NUEVO: Contadores para RX y TX
                     "media_stats": {
                         "whatsapp_packets_received": 0,
+                        "whatsapp_packets_sent": 0,
                         "browser_packets_received": 0,
+                        "browser_packets_sent": 0,
                         "start_time": time.time()
                     }
                 })
@@ -194,7 +195,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
 
-                # CORRECCIÓN 1: Ambos transceptores DEBEN ser bidireccionales
+                # Ambos transceptores DEBEN ser bidireccionales
                 browser_pc.addTransceiver("audio", direction="sendrecv")
                 whatsapp_pc.addTransceiver("audio", direction="sendrecv")
 
@@ -202,22 +203,40 @@ async def websocket_endpoint(websocket: WebSocket):
                 async def on_browser_track(track):
                     logging.info(f"[{call_id}] PISTA DEL NAVEGADOR RECIBIDA: kind={track.kind}")
                     if track.kind == "audio":
+                        # Contar paquetes RECIBIDOS del navegador
                         @track.on("frame")
-                        async def on_frame(frame):
+                        async def on_browser_frame_rx(frame):
                             session["media_stats"]["browser_packets_received"] += 1
                         
-                        whatsapp_pc.addTrack(relay.subscribe(track))
+                        # Crear el track para enviar a WhatsApp
+                        track_to_whatsapp = relay.subscribe(track)
+                        
+                        # NUEVO: Contar paquetes ENVIADOS a WhatsApp
+                        @track_to_whatsapp.on("frame")
+                        async def on_whatsapp_frame_tx(frame):
+                            session["media_stats"]["whatsapp_packets_sent"] += 1
+                        
+                        whatsapp_pc.addTrack(track_to_whatsapp)
                         logging.info(f"[{call_id}] Audio del navegador puenteado a WhatsApp.")
 
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
                     logging.info(f"[{call_id}] PISTA DE WHATSAPP RECIBIDA: kind={track.kind}")
                     if track.kind == "audio":
+                        # Contar paquetes RECIBIDOS de WhatsApp
                         @track.on("frame")
-                        async def on_frame(frame):
+                        async def on_whatsapp_frame_rx(frame):
                             session["media_stats"]["whatsapp_packets_received"] += 1
 
-                        browser_pc.addTrack(relay.subscribe(track))
+                        # Crear el track para enviar al navegador
+                        track_to_browser = relay.subscribe(track)
+
+                        # NUEVO: Contar paquetes ENVIADOS al navegador
+                        @track_to_browser.on("frame")
+                        async def on_browser_frame_tx(frame):
+                            session["media_stats"]["browser_packets_sent"] += 1
+
+                        browser_pc.addTrack(track_to_browser)
                         logging.info(f"[{call_id}] Audio de WhatsApp puenteado al navegador.")
 
                 @whatsapp_pc.on("connectionstatechange")
@@ -305,7 +324,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     session["status"] = "active"
                     logging.info(f"[{call_id}] Puente WebRTC activo - Iniciando monitoreo de media")
                     
-                    # CORRECCIÓN 2: Lógica de monitoreo de media simplificada y corregida
+                    # MODIFICADO: Lógica de monitoreo de media más completa
                     async def monitor_media_flow():
                         check_interval = 5
                         timeout_threshold = 15
@@ -316,19 +335,22 @@ async def websocket_endpoint(websocket: WebSocket):
 
                         while call_id in active_calls and session.get("status") == "active":
                             stats = session["media_stats"]
-                            whatsapp_rx = stats["whatsapp_packets_received"]
-                            browser_rx = stats["browser_packets_received"]
+                            wa_rx = stats["whatsapp_packets_received"]
+                            wa_tx = stats["whatsapp_packets_sent"]
+                            br_rx = stats["browser_packets_received"]
+                            br_tx = stats["browser_packets_sent"]
                             
-                            logging.info(f"[{call_id}] CHEQUEO MEDIA: WhatsApp RX={whatsapp_rx}, Navegador RX={browser_rx}")
+                            logging.info(f"[{call_id}] CHEQUEO MEDIA: WA (RX: {wa_rx}, TX: {wa_tx}) | Navegador (RX: {br_rx}, TX: {br_tx})")
                             
                             if time.time() - start_time > timeout_threshold:
-                                if whatsapp_rx == 0 or browser_rx == 0:
+                                # Chequeamos si todas las direcciones tienen flujo
+                                if wa_rx > 0 and wa_tx > 0 and br_rx > 0 and br_tx > 0:
+                                    logging.info(f"[{call_id}] Flujo de media bidireccional confirmado. Monitoreo de timeout finalizado.")
+                                    return # Termina la tarea de monitoreo
+                                else:
                                     logging.error(f"[{call_id}] TIMEOUT MEDIA: Flujo de media no es bidireccional después de {timeout_threshold}s.")
                                     await send_call_action(call_id, "terminate")
                                     return
-                                
-                                logging.info(f"[{call_id}] Flujo de media bidireccional confirmado. Monitoreo de timeout finalizado.")
-                                return
 
                             await asyncio.sleep(check_interval)
 
@@ -362,4 +384,3 @@ async def serve_frontend():
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
-
