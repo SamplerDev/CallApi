@@ -215,12 +215,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 whatsapp_pc = session["whatsapp_pc"]
                 browser_pc = session["browser_pc"]
-
+                
                 browser_answer = RTCSessionDescription(sdp=data["sdp"], type="answer")
                 await browser_pc.setRemoteDescription(browser_answer)
                 logging.info(f"[{call_id}] Negociación con navegador completada.")
 
-                # 2. Ahora, negociar con WhatsApp
                 logging.info(f"[{call_id}] Iniciando negociación con WhatsApp.")
                 whatsapp_sdp_offer = RTCSessionDescription(sdp=session["call_data"]["session"]["sdp"], type="offer")
                 await whatsapp_pc.setRemoteDescription(whatsapp_sdp_offer)
@@ -229,11 +228,31 @@ async def websocket_endpoint(websocket: WebSocket):
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
                 logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
 
-                # 3. Construir el SDP final manualmente (necesario para WhatsApp)
+                # Esperar a que ICE se complete
+                ice_complete = asyncio.Event()
+                
+                @whatsapp_pc.on("iceconnectionstatechange")
+                async def on_ice_change():
+                    logging.info(f"[{call_id}] ICE state: {whatsapp_pc.iceConnectionState}")
+                    if whatsapp_pc.iceConnectionState == "completed":
+                        ice_complete.set()
+                
+                try:
+                    await asyncio.wait_for(ice_complete.wait(), timeout=5)
+                    logging.info(f"[{call_id}] ICE completado")
+                except asyncio.TimeoutError:
+                    logging.warning(f"[{call_id}] ICE no completó en tiempo")
+
+                # AHORA: Extraer del SDP de aiortc Y construir manualmente
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
                 ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
                 ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
                 fingerprint = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=fingerprint:")), None)
+                
+                # EXTRAER CANDIDATOS ICE
+                ice_candidates = [line for line in local_sdp_lines if line.startswith("a=candidate:")]
+                logging.info(f"[{call_id}] Candidatos ICE extraídos: {len(ice_candidates)}")
+                
                 ssrc, cname, msid, track_id = None, None, None, None
                 cname_line = next((line for line in local_sdp_lines if line.startswith("a=ssrc:") and "cname:" in line), None)
                 if cname_line:
@@ -243,35 +262,43 @@ async def websocket_endpoint(websocket: WebSocket):
                     parts = msid_line.split(); msid = parts[0].split(':')[1]; track_id = parts[1]
 
                 if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname, msid, track_id]):
-                    logging.error(f"[{call_id}] Fallo crítico en la extracción de SDP. Abortando.")
+                    logging.error(f"[{call_id}] Falló la extracción de SDP. Abortando.")
                     continue
 
                 session_id_val = int(time.time() * 1000)
-                final_sdp = (
-                    f"v=0\r\n"
-                    f"o=- {session_id_val} 2 IN IP4 127.0.0.1\r\n"
-                    f"s=-\r\n"
-                    f"t=0 0\r\n"
-                    f"a=group:BUNDLE audio\r\n"
-                    f"a=msid-semantic: WMS {msid}\r\n"
-                    # La línea 'm=' ahora solo incluye los códecs que aiortc realmente negoció.
-                    # En tu log, solo era '111'. Si en el futuro negocias más, deberás añadirlos aquí.
-                    f"m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" 
-                    f"c=IN IP4 0.0.0.0\r\n"
-                    f"a=rtcp:9 IN IP4 0.0.0.0\r\n"
-                    f"a=ice-ufrag:{ice_ufrag}\r\n"
-                    f"a=ice-pwd:{ice_pwd}\r\n"
-                    f"a=fingerprint:{fingerprint}\r\n"
-                    f"a=setup:active\r\n"
-                    f"a=mid:audio\r\n"
-                    f"a=sendrecv\r\n"
-                    f"a=rtcp-mux\r\n"
-                    # Mantenemos solo la descripción del códec 111 (opus)
-                    f"a=rtpmap:111 opus/48000/2\r\n"
-                    f"a=fmtp:111 minptime=10;useinbandfec=1\r\n"
-                    f"a=ssrc:{ssrc} cname:{cname}\r\n"
-                    f"a=ssrc:{ssrc} msid:{msid} {track_id}\r\n"
-                )
+                
+                # Construir SDP con candidatos ICE
+                final_sdp_lines = [
+                    f"v=0",
+                    f"o=- {session_id_val} 2 IN IP4 127.0.0.1",
+                    f"s=-",
+                    f"t=0 0",
+                    f"a=group:BUNDLE audio",
+                    f"a=msid-semantic: WMS {msid}",
+                    f"m=audio 9 UDP/TLS/RTP/SAVPF 111",
+                    f"c=IN IP4 0.0.0.0",
+                    f"a=rtcp:9 IN IP4 0.0.0.0",
+                    f"a=ice-ufrag:{ice_ufrag}",
+                    f"a=ice-pwd:{ice_pwd}",
+                ]
+                
+                # AGREGAR candidatos ICE
+                final_sdp_lines.extend(ice_candidates)
+                
+                final_sdp_lines.extend([
+                    f"a=fingerprint:{fingerprint}",
+                    f"a=setup:active",
+                    f"a=mid:audio",
+                    f"a=sendrecv",
+                    f"a=rtcp-mux",
+                    f"a=rtpmap:111 opus/48000/2",
+                    f"a=fmtp:111 minptime=10;useinbandfec=1",
+                    f"a=ssrc:{ssrc} cname:{cname}",
+                    f"a=ssrc:{ssrc} msid:{msid} {track_id}",
+                ])
+                
+                final_sdp = "\r\n".join(final_sdp_lines)
+                logging.info(f"[{call_id}] SDP final con candidatos ICE:\n{final_sdp}")
                 
                 pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
                 if pre_accept_response:
@@ -280,7 +307,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     session["status"] = "active"
                     logging.info(f"[{call_id}] Puente WebRTC completado y activo.")
                 else:
-                    logging.error(f"[{call_id}] Falló el pre_accept. No se pudo conectar la llamada.")
+                    logging.error(f"[{call_id}] Falló el pre_accept.")
 
             elif event_type == "hangup_from_browser":
                 if call_id in active_calls:
