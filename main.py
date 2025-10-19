@@ -117,19 +117,6 @@ async def receive_call_notification(request: Request):
                         await agent_ws.send_json({"type": "call_terminated", "call_id": call_id})
                     except Exception: pass
                 
-                # Limpiar tracks antes de cerrar conexiones
-                if session.get("browser_to_whatsapp_track"):
-                    try:
-                        session["browser_to_whatsapp_track"].stop()
-                    except:
-                        pass
-                
-                if session.get("whatsapp_to_browser_track"):
-                    try:
-                        session["whatsapp_to_browser_track"].stop()
-                    except:
-                        pass
-                
                 # Cerrar conexiones
                 if session.get("whatsapp_pc"):
                     await session["whatsapp_pc"].close()
@@ -184,42 +171,33 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 browser_pc = RTCPeerConnection(configuration=config)
+                relay = MediaRelay()
                 
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
-                session["relay"] = MediaRelay()  # ← Guardar el relay en la sesión
-                
-                relay = session["relay"]
-                
-                # Almacenar referencias a los tracks para evitar que se recolecten
-                session["browser_to_whatsapp_track"] = None
-                session["whatsapp_to_browser_track"] = None
+                session["relay"] = relay
 
                 @browser_pc.on("track")
                 async def on_browser_track(track):
-                    logging.info(f"[{call_id}] Pista de audio del navegador recibida. Tipo: {track.kind}")
+                    logging.info(f"[{call_id}] Track de AUDIO del navegador recibido. Tipo: {track.kind}")
                     if track.kind == "audio":
-                        # Suscribirse al relay
+                        # Suscribirse al relay y agregar a WhatsApp
                         relay_track = relay.subscribe(track)
-                        session["browser_to_whatsapp_track"] = relay_track
-                        
-                        # Agregar el track al PC de WhatsApp
-                        sender = whatsapp_pc.addTrack(relay_track)
-                        logging.info(f"[{call_id}] Track del navegador agregado a WhatsApp PC")
+                        whatsapp_pc.addTrack(relay_track)
+                        logging.info(f"[{call_id}] Track del navegador reenviado a WhatsApp")
 
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
-                    logging.info(f"[{call_id}] Pista de audio de WhatsApp recibida. Tipo: {track.kind}")
+                    logging.info(f"[{call_id}] Track de AUDIO de WhatsApp recibido. Tipo: {track.kind}")
                     if track.kind == "audio":
-                        # Suscribirse al relay
+                        # Suscribirse al relay y agregar al navegador
                         relay_track = relay.subscribe(track)
-                        session["whatsapp_to_browser_track"] = relay_track
-                        
-                        # Agregar el track al PC del navegador
-                        sender = browser_pc.addTrack(relay_track)
-                        logging.info(f"[{call_id}] Track de WhatsApp agregado a Browser PC")
+                        browser_pc.addTrack(relay_track)
+                        logging.info(f"[{call_id}] Track de WhatsApp reenviado al navegador")
 
-                # NO agregar transceiver aquí
+                # Preparar transceiver ANTES de crear oferta
+                browser_pc.addTransceiver("audio", direction="sendrecv")
+                
                 logging.info(f"[{call_id}] Creando oferta para el navegador.")
                 browser_offer = await browser_pc.createOffer()
                 await browser_pc.setLocalDescription(browser_offer)
