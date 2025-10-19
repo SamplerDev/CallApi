@@ -117,8 +117,24 @@ async def receive_call_notification(request: Request):
                         await agent_ws.send_json({"type": "call_terminated", "call_id": call_id})
                     except Exception: pass
                 
-                if session.get("whatsapp_pc"): await session["whatsapp_pc"].close()
-                if session.get("browser_pc"): await session["browser_pc"].close()
+                # Limpiar tracks antes de cerrar conexiones
+                if session.get("browser_to_whatsapp_track"):
+                    try:
+                        session["browser_to_whatsapp_track"].stop()
+                    except:
+                        pass
+                
+                if session.get("whatsapp_to_browser_track"):
+                    try:
+                        session["whatsapp_to_browser_track"].stop()
+                    except:
+                        pass
+                
+                # Cerrar conexiones
+                if session.get("whatsapp_pc"):
+                    await session["whatsapp_pc"].close()
+                if session.get("browser_pc"):
+                    await session["browser_pc"].close()
                 
                 logging.info(f"Sesión para {call_id} terminada y limpiada.")
 
@@ -171,28 +187,39 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
-
-                # --- [SOLUCIÓN] USAR MediaRelay CORRECTAMENTE ---
-                relay = MediaRelay()
+                session["relay"] = MediaRelay()  # ← Guardar el relay en la sesión
                 
+                relay = session["relay"]
+                
+                # Almacenar referencias a los tracks para evitar que se recolecten
+                session["browser_to_whatsapp_track"] = None
+                session["whatsapp_to_browser_track"] = None
+
                 @browser_pc.on("track")
                 async def on_browser_track(track):
-                    logging.info(f"[{call_id}] Pista del navegador recibida. Conectando a la salida de WhatsApp.")
-                    # La pista del navegador se convierte en la entrada del relay,
-                    # y la salida del relay se añade a la conexión de WhatsApp.
-                    whatsapp_pc.addTrack(relay.subscribe(track))
+                    logging.info(f"[{call_id}] Pista de audio del navegador recibida. Tipo: {track.kind}")
+                    if track.kind == "audio":
+                        # Suscribirse al relay
+                        relay_track = relay.subscribe(track)
+                        session["browser_to_whatsapp_track"] = relay_track
+                        
+                        # Agregar el track al PC de WhatsApp
+                        sender = whatsapp_pc.addTrack(relay_track)
+                        logging.info(f"[{call_id}] Track del navegador agregado a WhatsApp PC")
 
                 @whatsapp_pc.on("track")
                 async def on_whatsapp_track(track):
-                    logging.info(f"[{call_id}] Pista de WhatsApp recibida. Conectando a la salida del navegador.")
-                    # La pista de WhatsApp se convierte en la entrada del relay,
-                    # y la salida del relay se añade a la conexión del navegador.
-                    browser_pc.addTrack(relay.subscribe(track))
+                    logging.info(f"[{call_id}] Pista de audio de WhatsApp recibida. Tipo: {track.kind}")
+                    if track.kind == "audio":
+                        # Suscribirse al relay
+                        relay_track = relay.subscribe(track)
+                        session["whatsapp_to_browser_track"] = relay_track
+                        
+                        # Agregar el track al PC del navegador
+                        sender = browser_pc.addTrack(relay_track)
+                        logging.info(f"[{call_id}] Track de WhatsApp agregado a Browser PC")
 
-                # 1. Iniciar negociación con el navegador PRIMERO
-                # Preparamos al browser_pc para que envíe el audio del micrófono Y reciba audio.
-                browser_pc.addTransceiver("audio", direction="sendrecv")
-                
+                # NO agregar transceiver aquí
                 logging.info(f"[{call_id}] Creando oferta para el navegador.")
                 browser_offer = await browser_pc.createOffer()
                 await browser_pc.setLocalDescription(browser_offer)
@@ -203,6 +230,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     "call_id": call_id,
                     "sdp": browser_pc.localDescription.sdp
                 })
+
+            
 
             elif event_type == "answer_from_browser":
                 logging.info(f"[{call_id}] Recibida RESPUESTA SDP del navegador.")

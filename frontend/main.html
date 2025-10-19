@@ -102,48 +102,62 @@ console.log(`Intentando conectar a: ${wsUrl}`);
             };
         }
 
-        answerBtn.onclick = async () => {
-            incomingCallDiv.style.display = 'none';
-            onCallDiv.style.display = 'block';
-            
-            try {
-                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-                console.log("Acceso al micrófono obtenido.");
-            } catch (e) {
-                console.error("Error al obtener acceso al micrófono:", e);
-                alert("No se pudo acceder al micrófono. Por favor, revisa los permisos.");
-                resetCallState();
-                return;
-            }
+    answerBtn.onclick = async () => {
+    incomingCallDiv.style.display = 'none';
+    onCallDiv.style.display = 'block';
+    
+    // Solo enviar al servidor que queremos contestar
+    // La captura del micrófono ocurrirá después
+    ws.send(JSON.stringify({ type: 'answer_call', call_id: currentCallId }));
+};
 
-            ws.send(JSON.stringify({ type: 'answer_call', call_id: currentCallId }));
-        };
-
-        async function handleOfferFromServer(sdp) {
-            pc = new RTCPeerConnection();
-
-            pc.ontrack = (event) => {
-                console.log("Pista de audio remota recibida del servidor.");
-                if (audioPlayer.srcObject !== event.streams[0]) {
-                    audioPlayer.srcObject = event.streams[0];
-                }
-            };
-
-            localStream.getTracks().forEach(track => {
-                console.log("Añadiendo pista de audio local a la conexión.");
-                pc.addTrack(track, localStream);
+async function handleOfferFromServer(sdp) {
+    try {
+        // AHORA capturamos el micrófono, cuando recibimos la oferta
+        if (!localStream) {
+            localStream = await navigator.mediaDevices.getUserMedia({ 
+                audio: true, 
+                video: false 
             });
-
-            await pc.setRemoteDescription({ type: 'offer', sdp: sdp });
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-
-            ws.send(JSON.stringify({
-                type: 'answer_from_browser',
-                call_id: currentCallId,
-                sdp: pc.localDescription.sdp
-            }));
+            console.log("Micrófono capturado después de recibir oferta del servidor.");
         }
+    } catch (e) {
+        console.error("Error al obtener acceso al micrófono:", e);
+        alert("No se pudo acceder al micrófono. Por favor, revisa los permisos.");
+        resetCallState();
+        return;
+    }
+
+    // Crear la conexión
+    pc = new RTCPeerConnection();
+
+    pc.ontrack = (event) => {
+        console.log("Pista de audio remota recibida del servidor.");
+        if (audioPlayer.srcObject !== event.streams[0]) {
+            audioPlayer.srcObject = event.streams[0];
+        }
+    };
+
+    // AQUÍ agregamos el track del micrófono capturado
+    localStream.getTracks().forEach(track => {
+        console.log("Añadiendo pista de audio local a la conexión.");
+        pc.addTrack(track, localStream);
+    });
+
+    // Completar la negociación
+    await pc.setRemoteDescription({ type: 'offer', sdp: sdp });
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    ws.send(JSON.stringify({
+        type: 'answer_from_browser',
+        call_id: currentCallId,
+        sdp: pc.localDescription.sdp
+    }));
+}
+
+
+
 
         hangupBtn.onclick = () => {
             ws.send(JSON.stringify({ type: 'hangup_from_browser', call_id: currentCallId }));
