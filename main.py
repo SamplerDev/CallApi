@@ -183,7 +183,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     # ===== NUEVOS HANDLERS CON LOGGING DIAGNÓSTICO =====
                     @browser_pc.on("track")
                     async def on_browser_track(track):
-                        logging.info(f"[{call_id}] Track recibido: kind={track.kind}, enabled={track.enabled}")
+                        logging.info(f"[{call_id}] Track recibido: kind={track.kind}, id={track.id}")
                         
                         if track.kind == "audio":
                             sender = whatsapp_pc.addTrack(track)
@@ -246,126 +246,58 @@ async def websocket_endpoint(websocket: WebSocket):
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
                 logging.info(f"[{call_id}] Respuesta para WhatsApp generada.")
 
-                # Esperar a que ICE se complete
-                ice_complete = asyncio.Event()
                 
-                @whatsapp_pc.on("iceconnectionstatechange")
-                async def on_ice_change():
-                    logging.info(f"[{call_id}] ICE state: {whatsapp_pc.iceConnectionState}")
-                    if whatsapp_pc.iceConnectionState == "completed":
-                        ice_complete.set()
-                
-                try:
-                    await asyncio.wait_for(ice_complete.wait(), timeout=10)
-                    logging.info(f"[{call_id}] ICE completado")
-                except asyncio.TimeoutError:
-                    logging.warning(f"[{call_id}] ICE no completó en tiempo")
+            
+                logging.info(f"[{call_id}] Construyendo SDP final a partir de la respuesta de aiortc...")
+                source_sdp = whatsapp_pc.localDescription.sdp
+                source_lines = source_sdp.splitlines()
 
-                # AHORA ESPERAR A QUE DTLS ESTÉ CONECTADO
-                logging.info(f"[{call_id}] Esperando DTLS establecido...")
-                dtls_connected = asyncio.Event()
-                
-                @whatsapp_pc.on("connectionstatechange")
-                async def on_whatsapp_connection_change():
-                    logging.info(f"[{call_id}] Estado conexión WhatsApp: {whatsapp_pc.connectionState}")
-                    if whatsapp_pc.connectionState == "connected":
-                        dtls_connected.set()
-                    elif whatsapp_pc.connectionState == "failed":
-                        logging.error(f"[{call_id}] Conexión WhatsApp FALLÓ")
-                
-                try:
-                    await asyncio.wait_for(dtls_connected.wait(), timeout=15)
-                    logging.info(f"[{call_id}] DTLS establecido y conectado")
-                except asyncio.TimeoutError:
-                    logging.error(f"[{call_id}] DTLS no se estableció en tiempo (timeout)")
+                ice_ufrag = next(line.split(':', 1)[1] for line in source_lines if line.startswith("a=ice-ufrag:"))
+                ice_pwd = next(line.split(':', 1)[1] for line in source_lines if line.startswith("a=ice-pwd:"))
+                fingerprint_line = next(line for line in source_lines if line.startswith("a=fingerprint:sha-256"))
+                fingerprint = fingerprint_line.split(' ', 1)[1]
 
-                # Extraer del SDP
-                 # --- NUEVO BLOQUE DE CONSTRUCCIÓN DINÁMICA DE SDP ---
+                ssrc_line = next(line for line in source_lines if line.startswith("a=ssrc:") and "cname:" in line)
+                ssrc_parts = ssrc_line.split()
+                ssrc = ssrc_parts[0].split(':')[1]
+                cname = ssrc_parts[1].split('cname:')[1]
 
-                    logging.info(f"[{call_id}] Construyendo SDP final a partir de la respuesta de aiortc...")
+                msid_line = next(line for line in source_lines if line.startswith("a=ssrc:") and "msid:" in line and ssrc in line)
+                msid_parts = msid_line.split()
+                msid = msid_parts[1].split(':')[1]
+                track_id = msid_parts[2]
 
-                    # 1. Obtener el SDP generado por aiortc como fuente de datos
-                    source_sdp = whatsapp_pc.localDescription.sdp
-                    source_lines = source_sdp.splitlines()
+                m_line = next(line for line in source_lines if line.startswith("m=audio"))
+                payload_types = m_line.split()[3:]
 
-                    # 2. Extraer todos los valores dinámicos necesarios
-                    try:
-                        ice_ufrag = next(line.split(':', 1)[1] for line in source_lines if line.startswith("a=ice-ufrag:"))
-                        ice_pwd = next(line.split(':', 1)[1] for line in source_lines if line.startswith("a=ice-pwd:"))
-                        fingerprint_line = next(line for line in source_lines if line.startswith("a=fingerprint:sha-256"))
-                        fingerprint = fingerprint_line.split(' ', 1)[1]
+                rtpmap_lines = [line for pt in payload_types for line in source_lines if line.startswith(f"a=rtpmap:{pt}")]
+                fmtp_lines = [line for pt in payload_types for line in source_lines if line.startswith(f"a=fmtp:{pt}")]
+                ice_candidates = [line for line in source_lines if line.startswith("a=candidate:")]
 
-                        # Extraer SSRC, CNAME, MSID, y Track ID (lógica más robusta)
-                        ssrc_line = next(line for line in source_lines if line.startswith("a=ssrc:") and "cname:" in line)
-                        ssrc_parts = ssrc_line.split()
-                        ssrc = ssrc_parts[0].split(':')[1]
-                        cname = ssrc_parts[1].split('cname:')[1]
+                session_id_val = int(time.time() * 1000)
+                final_sdp_lines = [
+                    "v=0", f"o=- {session_id_val} 2 IN IP4 127.0.0.1", "s=-", "t=0 0",
+                    "a=group:BUNDLE audio", f"a=msid-semantic: WMS {msid}",
+                    f"m=audio 9 UDP/TLS/RTP/SAVPF {' '.join(payload_types)}",
+                    "c=IN IP4 0.0.0.0", "a=rtcp:9 IN IP4 0.0.0.0",
+                    f"a=ice-ufrag:{ice_ufrag}", f"a=ice-pwd:{ice_pwd}",
+                ]
+                final_sdp_lines.extend(ice_candidates)
+                final_sdp_lines.extend([
+                    f"a=fingerprint:sha-256 {fingerprint}", "a=setup:active", "a=mid:audio",
+                    "a=sendrecv", "a=rtcp-mux",
+                ])
+                final_sdp_lines.extend(rtpmap_lines)
+                final_sdp_lines.extend(fmtp_lines)
+                final_sdp_lines.extend([
+                    f"a=ssrc:{ssrc} cname:{cname}",
+                    f"a=ssrc:{ssrc} msid:{msid} {track_id}",
+                ])
+                final_sdp = "\r\n".join(final_sdp_lines) + "\r\n"
 
-                        msid_line = next(line for line in source_lines if line.startswith("a=ssrc:") and "msid:" in line and ssrc in line)
-                        msid_parts = msid_line.split()
-                        msid = msid_parts[1].split(':')[1]
-                        track_id = msid_parts[2]
+            
 
-                        # Extraer dinámicamente los payload types de la línea 'm='
-                        m_line = next(line for line in source_lines if line.startswith("m=audio"))
-                        payload_types = m_line.split()[3:] # Obtiene todos los números de payload (ej: ['111', '126'])
-
-                        # Extraer las líneas rtpmap y fmtp correspondientes a los payload types negociados
-                        rtpmap_lines = [line for pt in payload_types for line in source_lines if line.startswith(f"a=rtpmap:{pt}")]
-                        fmtp_lines = [line for pt in payload_types for line in source_lines if line.startswith(f"a=fmtp:{pt}")]
-
-                        # Extraer todos los candidatos ICE
-                        ice_candidates = [line for line in source_lines if line.startswith("a=candidate:")]
-
-                    except StopIteration as e:
-                        logging.error(f"[{call_id}] Fallo crítico al extraer un valor del SDP de aiortc: {e}. Abortando.")
-                        await send_call_action(call_id, "terminate")
-                        continue
-
-                    # 3. Construir el SDP final en el formato de WhatsApp
-                    session_id_val = int(time.time() * 1000)
-                    final_sdp_lines = [
-                        "v=0",
-                        f"o=- {session_id_val} 2 IN IP4 127.0.0.1",
-                        "s=-",
-                        "t=0 0",
-                        "a=group:BUNDLE audio",
-                        f"a=msid-semantic: WMS {msid}",
-                        # Reconstruir la línea 'm=' con los payload types extraídos
-                        f"m=audio 9 UDP/TLS/RTP/SAVPF {' '.join(payload_types)}",
-                        "c=IN IP4 0.0.0.0",
-                        "a=rtcp:9 IN IP4 0.0.0.0",
-                        f"a=ice-ufrag:{ice_ufrag}",
-                        f"a=ice-pwd:{ice_pwd}",
-                    ]
-
-                    # Agregar los candidatos ICE extraídos
-                    final_sdp_lines.extend(ice_candidates)
-
-                    # Agregar el resto de los atributos
-                    final_sdp_lines.extend([
-                        f"a=fingerprint:sha-256 {fingerprint}",
-                        "a=setup:active",
-                        "a=mid:audio",
-                        "a=sendrecv",
-                        "a=rtcp-mux",
-                    ])
-
-                    # Agregar las líneas rtpmap y fmtp extraídas
-                    final_sdp_lines.extend(rtpmap_lines)
-                    final_sdp_lines.extend(fmtp_lines)
-
-                    # Agregar las líneas ssrc
-                    final_sdp_lines.extend([
-                        f"a=ssrc:{ssrc} cname:{cname}",
-                        f"a=ssrc:{ssrc} msid:{msid} {track_id}",
-                    ])
-
-                    final_sdp = "\r\n".join(final_sdp_lines) + "\r\n"
-
-                    # --- FIN DEL NUEVO BLOQUE ---
                 logging.info(f"[{call_id}] SDP final con candidatos ICE:\n{final_sdp}")
-                
                 
                 pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
                 if pre_accept_response:
@@ -374,7 +306,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     session["status"] = "active"
                     logging.info(f"[{call_id}] Puente WebRTC completado y activo.")
                 else:
-                    logging.error(f"[{call_id}] Falló el pre_accept.")
+                    logging.error(f"[{call_id}] Falló el pre_accept.")        
             elif event_type == "hangup_from_browser":
                 if call_id in active_calls:
                     await send_call_action(call_id, "terminate")
