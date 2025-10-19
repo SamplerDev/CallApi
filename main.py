@@ -280,60 +280,92 @@ async def websocket_endpoint(websocket: WebSocket):
                     logging.error(f"[{call_id}] DTLS no se estableció en tiempo (timeout)")
 
                 # Extraer del SDP
-                local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
-                ice_ufrag = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-ufrag:")), None)
-                ice_pwd = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=ice-pwd:")), None)
-                fingerprint = next((line.split(':', 1)[1] for line in local_sdp_lines if line.startswith("a=fingerprint:")), None)
-                
-                ice_candidates = [line for line in local_sdp_lines if line.startswith("a=candidate:")]
-                logging.info(f"[{call_id}] Candidatos ICE extraídos: {len(ice_candidates)}")
-                
-                ssrc, cname, msid, track_id = None, None, None, None
-                cname_line = next((line for line in local_sdp_lines if line.startswith("a=ssrc:") and "cname:" in line), None)
-                if cname_line:
-                    parts = cname_line.split(); ssrc = parts[0].split(':')[1]; cname = parts[1].split('cname:')[1]
-                msid_line = next((line for line in local_sdp_lines if line.startswith("a=msid:")), None)
-                if msid_line:
-                    parts = msid_line.split(); msid = parts[0].split(':')[1]; track_id = parts[1]
+                 # --- NUEVO BLOQUE DE CONSTRUCCIÓN DINÁMICA DE SDP ---
 
-                if not all([ice_ufrag, ice_pwd, fingerprint, ssrc, cname, msid, track_id]):
-                    logging.error(f"[{call_id}] Falló la extracción de SDP. Abortando.")
-                    continue
+                    logging.info(f"[{call_id}] Construyendo SDP final a partir de la respuesta de aiortc...")
 
-                session_id_val = int(time.time() * 1000)
-                
-                final_sdp_lines = [
-                    f"v=0",
-                    f"o=- {session_id_val} 2 IN IP4 127.0.0.1",
-                    f"s=-",
-                    f"t=0 0",
-                    f"a=group:BUNDLE audio",
-                    f"a=msid-semantic: WMS {msid}",
-                    f"m=audio 9 UDP/TLS/RTP/SAVPF 111",
-                    f"c=IN IP4 0.0.0.0",
-                    f"a=rtcp:9 IN IP4 0.0.0.0",
-                    f"a=ice-ufrag:{ice_ufrag}",
-                    f"a=ice-pwd:{ice_pwd}",
-                ]
-                
-                final_sdp_lines.extend(ice_candidates)
-                
-                final_sdp_lines.extend([
-                    f"a=fingerprint:{fingerprint}",
-                    f"a=setup:active",
-                    f"a=mid:audio",
-                    f"a=sendrecv",
-                    f"a=rtcp-mux",
-                    f"a=rtpmap:111 opus/48000/2",
-                    f"a=fmtp:111 minptime=10;useinbandfec=1",
-                    f"a=ssrc:{ssrc} cname:{cname}",
-                    f"a=ssrc:{ssrc} msid:{msid} {track_id}",
-                ])
-                
-                final_sdp = "\r\n".join(final_sdp_lines)
+                    # 1. Obtener el SDP generado por aiortc como fuente de datos
+                    source_sdp = whatsapp_pc.localDescription.sdp
+                    source_lines = source_sdp.splitlines()
+
+                    # 2. Extraer todos los valores dinámicos necesarios
+                    try:
+                        ice_ufrag = next(line.split(':', 1)[1] for line in source_lines if line.startswith("a=ice-ufrag:"))
+                        ice_pwd = next(line.split(':', 1)[1] for line in source_lines if line.startswith("a=ice-pwd:"))
+                        fingerprint_line = next(line for line in source_lines if line.startswith("a=fingerprint:sha-256"))
+                        fingerprint = fingerprint_line.split(' ', 1)[1]
+
+                        # Extraer SSRC, CNAME, MSID, y Track ID (lógica más robusta)
+                        ssrc_line = next(line for line in source_lines if line.startswith("a=ssrc:") and "cname:" in line)
+                        ssrc_parts = ssrc_line.split()
+                        ssrc = ssrc_parts[0].split(':')[1]
+                        cname = ssrc_parts[1].split('cname:')[1]
+
+                        msid_line = next(line for line in source_lines if line.startswith("a=ssrc:") and "msid:" in line and ssrc in line)
+                        msid_parts = msid_line.split()
+                        msid = msid_parts[1].split(':')[1]
+                        track_id = msid_parts[2]
+
+                        # Extraer dinámicamente los payload types de la línea 'm='
+                        m_line = next(line for line in source_lines if line.startswith("m=audio"))
+                        payload_types = m_line.split()[3:] # Obtiene todos los números de payload (ej: ['111', '126'])
+
+                        # Extraer las líneas rtpmap y fmtp correspondientes a los payload types negociados
+                        rtpmap_lines = [line for pt in payload_types for line in source_lines if line.startswith(f"a=rtpmap:{pt}")]
+                        fmtp_lines = [line for pt in payload_types for line in source_lines if line.startswith(f"a=fmtp:{pt}")]
+
+                        # Extraer todos los candidatos ICE
+                        ice_candidates = [line for line in source_lines if line.startswith("a=candidate:")]
+
+                    except StopIteration as e:
+                        logging.error(f"[{call_id}] Fallo crítico al extraer un valor del SDP de aiortc: {e}. Abortando.")
+                        await send_call_action(call_id, "terminate")
+                        continue
+
+                    # 3. Construir el SDP final en el formato de WhatsApp
+                    session_id_val = int(time.time() * 1000)
+                    final_sdp_lines = [
+                        "v=0",
+                        f"o=- {session_id_val} 2 IN IP4 127.0.0.1",
+                        "s=-",
+                        "t=0 0",
+                        "a=group:BUNDLE audio",
+                        f"a=msid-semantic: WMS {msid}",
+                        # Reconstruir la línea 'm=' con los payload types extraídos
+                        f"m=audio 9 UDP/TLS/RTP/SAVPF {' '.join(payload_types)}",
+                        "c=IN IP4 0.0.0.0",
+                        "a=rtcp:9 IN IP4 0.0.0.0",
+                        f"a=ice-ufrag:{ice_ufrag}",
+                        f"a=ice-pwd:{ice_pwd}",
+                    ]
+
+                    # Agregar los candidatos ICE extraídos
+                    final_sdp_lines.extend(ice_candidates)
+
+                    # Agregar el resto de los atributos
+                    final_sdp_lines.extend([
+                        f"a=fingerprint:sha-256 {fingerprint}",
+                        "a=setup:active",
+                        "a=mid:audio",
+                        "a=sendrecv",
+                        "a=rtcp-mux",
+                    ])
+
+                    # Agregar las líneas rtpmap y fmtp extraídas
+                    final_sdp_lines.extend(rtpmap_lines)
+                    final_sdp_lines.extend(fmtp_lines)
+
+                    # Agregar las líneas ssrc
+                    final_sdp_lines.extend([
+                        f"a=ssrc:{ssrc} cname:{cname}",
+                        f"a=ssrc:{ssrc} msid:{msid} {track_id}",
+                    ])
+
+                    final_sdp = "\r\n".join(final_sdp_lines) + "\r\n"
+
+                    # --- FIN DEL NUEVO BLOQUE ---
                 logging.info(f"[{call_id}] SDP final con candidatos ICE:\n{final_sdp}")
-                logging.info(f"--- SDP GENERADO POR AIORTC ---\n{whatsapp_pc.localDescription.sdp}")
-                logging.info(f"--- SDP ARMADO MANUALMENTE ---\n{final_sdp}")
+                
                 
                 pre_accept_response = await send_call_action(call_id, "pre_accept", final_sdp)
                 if pre_accept_response:
