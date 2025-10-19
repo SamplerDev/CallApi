@@ -15,6 +15,19 @@
         #incoming-call { display: none; }
         #on-call { display: none; }
         audio { margin-top: 15px; width: 100%; }
+        #debug-log { 
+            margin-top: 20px; 
+            padding: 10px; 
+            background-color: #f5f5f5; 
+            border: 1px solid #ddd; 
+            border-radius: 5px; 
+            max-height: 200px; 
+            overflow-y: auto; 
+            font-size: 12px;
+            font-family: monospace;
+            width: 90%;
+            max-width: 500px;
+        }
     </style>
 </head>
 <body>
@@ -34,6 +47,8 @@
         <button id="hangup-btn">Colgar</button>
     </div>
 
+    <div id="debug-log"></div>
+
     <script>
         const statusDiv = document.getElementById('status');
         const incomingCallDiv = document.getElementById('incoming-call');
@@ -43,124 +58,169 @@
         const callerNameSpan = document.getElementById('caller-name');
         const onCallNameSpan = document.getElementById('on-call-name');
         const audioPlayer = document.getElementById('audio');
+        const debugLog = document.getElementById('debug-log');
 
         let ws;
-        let pc; // RTCPeerConnection
-        let localStream; // MediaStream del micrófono
+        let pc;
+        let localStream;
         let currentCallId = null;
 
+        function log(message) {
+            console.log(message);
+            debugLog.innerHTML += `${new Date().toLocaleTimeString()} - ${message}<br>`;
+            debugLog.scrollTop = debugLog.scrollHeight;
+        }
+
         function connect() {
-            // --- [SOLUCIÓN PARTE 1] ---
-            // Detectar si la página es segura (https) y usar el protocolo WebSocket seguro (wss)
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-const wsUrl = `${protocol}//${window.location.host}/ws`;
-console.log(`Intentando conectar a: ${wsUrl}`);
-            // --- FIN DE LA SOLUCIÓN ---
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            log(`Intentando conectar a: ${wsUrl}`);
 
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
-                console.log("Conectado al servidor WebSocket.");
+                log("✅ Conectado al servidor WebSocket");
                 statusDiv.textContent = "Estado: Conectado al Lobby";
                 statusDiv.className = 'status-connected';
             };
 
             ws.onmessage = async (event) => {
                 const data = JSON.parse(event.data);
-                console.log("Mensaje recibido:", data);
+                log(`📩 Mensaje recibido: ${data.type}`);
 
                 switch (data.type) {
                     case 'incoming_call':
-                        if (currentCallId) return; // Ya en una llamada o con una notificación
+                        if (currentCallId) return;
                         currentCallId = data.call_id;
                         callerNameSpan.textContent = data.from;
                         onCallNameSpan.textContent = data.from;
                         incomingCallDiv.style.display = 'block';
+                        log(`📞 Llamada entrante de ${data.from}`);
                         break;
                     
                     case 'offer_from_server':
+                        log(`📨 Recibida oferta del servidor`);
                         await handleOfferFromServer(data.sdp);
                         break;
 
                     case 'call_terminated':
+                        log(`❌ Llamada terminada`);
                         resetCallState();
                         break;
                 }
             };
 
             ws.onclose = () => {
-                console.log("Desconectado del servidor WebSocket. Intentando reconectar...");
+                log("🔌 Desconectado del servidor. Reconectando en 3s...");
                 statusDiv.textContent = "Estado: Desconectado";
                 statusDiv.className = 'status-disconnected';
                 resetCallState();
-                setTimeout(connect, 3000); // Reconectar cada 3 segundos
+                setTimeout(connect, 3000);
             };
 
             ws.onerror = (error) => {
-                console.error("Error de WebSocket:", error);
+                log(`❌ Error de WebSocket: ${error}`);
                 ws.close();
             };
         }
 
-    answerBtn.onclick = async () => {
-    incomingCallDiv.style.display = 'none';
-    onCallDiv.style.display = 'block';
-    
-    // Solo enviar al servidor que queremos contestar
-    // La captura del micrófono ocurrirá después
-    ws.send(JSON.stringify({ type: 'answer_call', call_id: currentCallId }));
-};
+        answerBtn.onclick = async () => {
+            log(`🎙️ Contestando llamada...`);
+            incomingCallDiv.style.display = 'none';
+            
+            // Capturar micrófono ANTES de contestar
+            try {
+                if (!localStream) {
+                    log(`🔊 Solicitando acceso al micrófono...`);
+                    localStream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: true, 
+                        video: false 
+                    });
+                    log(`✅ Micrófono capturado exitosamente`);
+                }
+            } catch (e) {
+                log(`❌ Error al capturar micrófono: ${e.message}`);
+                alert("No se pudo acceder al micrófono. Por favor, revisa los permisos.");
+                resetCallState();
+                return;
+            }
 
-async function handleOfferFromServer(sdp) {
-    try {
-        // AHORA capturamos el micrófono, cuando recibimos la oferta
-        if (!localStream) {
-            localStream = await navigator.mediaDevices.getUserMedia({ 
-                audio: true, 
-                video: false 
-            });
-            console.log("Micrófono capturado después de recibir oferta del servidor.");
+            // DESPUÉS de capturar el micrófono, enviar answer_call
+            log(`📤 Enviando answer_call al servidor...`);
+            ws.send(JSON.stringify({ 
+                type: 'answer_call', 
+                call_id: currentCallId 
+            }));
+        };
+
+        async function handleOfferFromServer(sdp) {
+            try {
+                log(`🔗 Creando RTCPeerConnection...`);
+                pc = new RTCPeerConnection();
+
+                // Event: cuando recibimos audio remoto (de WhatsApp)
+                pc.ontrack = (event) => {
+                    log(`🎵 Recibida pista de audio remota`);
+                    if (audioPlayer.srcObject !== event.streams[0]) {
+                        audioPlayer.srcObject = event.streams[0];
+                        log(`✅ Audio remoto conectado al player`);
+                    }
+                };
+
+                // Event: cambios en la conexión
+                pc.onconnectionstatechange = () => {
+                    log(`🔌 Estado conexión: ${pc.connectionState}`);
+                };
+
+                pc.oniceconnectionstatechange = () => {
+                    log(`❄️ Estado ICE: ${pc.iceConnectionState}`);
+                };
+
+                // CRÍTICO: Agregar el stream local ANTES de setRemoteDescription
+                if (localStream) {
+                    log(`➕ Agregando pistas de audio local a la conexión...`);
+                    localStream.getTracks().forEach((track, index) => {
+                        log(`  ├─ Agregando track ${index}: ${track.kind}`);
+                        pc.addTrack(track, localStream);
+                    });
+                    log(`✅ Todas las pistas locales agregadas`);
+                } else {
+                    log(`❌ CRÍTICO: localStream es null!`);
+                }
+
+                // Ahora sí procesar la oferta
+                log(`📝 Procesando oferta remota...`);
+                await pc.setRemoteDescription({ type: 'offer', sdp: sdp });
+                log(`✅ Oferta remota procesada`);
+
+                log(`🤝 Creando answer...`);
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                log(`✅ Answer creado y configurado`);
+
+                log(`📤 Enviando answer al servidor...`);
+                ws.send(JSON.stringify({
+                    type: 'answer_from_browser',
+                    call_id: currentCallId,
+                    sdp: pc.localDescription.sdp
+                }));
+
+                onCallDiv.style.display = 'block';
+                log(`📞 Conectado en la llamada`);
+
+            } catch (error) {
+                log(`❌ Error en handleOfferFromServer: ${error.message}`);
+                console.error(error);
+                resetCallState();
+            }
         }
-    } catch (e) {
-        console.error("Error al obtener acceso al micrófono:", e);
-        alert("No se pudo acceder al micrófono. Por favor, revisa los permisos.");
-        resetCallState();
-        return;
-    }
-
-    // Crear la conexión
-    pc = new RTCPeerConnection();
-
-    pc.ontrack = (event) => {
-        console.log("Pista de audio remota recibida del servidor.");
-        if (audioPlayer.srcObject !== event.streams[0]) {
-            audioPlayer.srcObject = event.streams[0];
-        }
-    };
-
-    // AQUÍ agregamos el track del micrófono capturado
-    localStream.getTracks().forEach(track => {
-        console.log("Añadiendo pista de audio local a la conexión.");
-        pc.addTrack(track, localStream);
-    });
-
-    // Completar la negociación
-    await pc.setRemoteDescription({ type: 'offer', sdp: sdp });
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    ws.send(JSON.stringify({
-        type: 'answer_from_browser',
-        call_id: currentCallId,
-        sdp: pc.localDescription.sdp
-    }));
-}
-
-
-
 
         hangupBtn.onclick = () => {
-            ws.send(JSON.stringify({ type: 'hangup_from_browser', call_id: currentCallId }));
+            log(`☎️ Colgando llamada...`);
+            ws.send(JSON.stringify({ 
+                type: 'hangup_from_browser', 
+                call_id: currentCallId 
+            }));
             resetCallState();
         };
 
@@ -177,8 +237,10 @@ async function handleOfferFromServer(sdp) {
             onCallDiv.style.display = 'none';
             currentCallId = null;
             audioPlayer.srcObject = null;
+            log(`🔄 Estado de llamada reiniciado`);
         }
 
+        log(`🚀 Inicializando agente...`);
         connect();
     </script>
 </body>
