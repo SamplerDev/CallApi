@@ -250,10 +250,28 @@ async def websocket_endpoint(websocket: WebSocket):
                         ice_complete.set()
                 
                 try:
-                    await asyncio.wait_for(ice_complete.wait(), timeout=5)
+                    await asyncio.wait_for(ice_complete.wait(), timeout=10)
                     logging.info(f"[{call_id}] ICE completado")
                 except asyncio.TimeoutError:
                     logging.warning(f"[{call_id}] ICE no completó en tiempo")
+
+                # AHORA ESPERAR A QUE DTLS ESTÉ CONECTADO
+                logging.info(f"[{call_id}] Esperando DTLS establecido...")
+                dtls_connected = asyncio.Event()
+                
+                @whatsapp_pc.on("connectionstatechange")
+                async def on_whatsapp_connection_change():
+                    logging.info(f"[{call_id}] Estado conexión WhatsApp: {whatsapp_pc.connectionState}")
+                    if whatsapp_pc.connectionState == "connected":
+                        dtls_connected.set()
+                    elif whatsapp_pc.connectionState == "failed":
+                        logging.error(f"[{call_id}] Conexión WhatsApp FALLÓ")
+                
+                try:
+                    await asyncio.wait_for(dtls_connected.wait(), timeout=15)
+                    logging.info(f"[{call_id}] DTLS establecido y conectado")
+                except asyncio.TimeoutError:
+                    logging.error(f"[{call_id}] DTLS no se estableció en tiempo (timeout)")
 
                 # Extraer del SDP
                 local_sdp_lines = whatsapp_pc.localDescription.sdp.splitlines()
