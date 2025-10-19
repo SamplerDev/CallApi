@@ -131,7 +131,6 @@ async def receive_call_notification(request: Request):
                 if session.get("monitor_task"):
                     session["monitor_task"].cancel()
                 
-                # MODIFICADO: Detener ambas grabadoras
                 if session.get("whatsapp_recorder"):
                     await session["whatsapp_recorder"].stop()
                     logging.info(f"Grabación de WhatsApp guardada en {session['whatsapp_recorder'].file}")
@@ -153,7 +152,6 @@ async def receive_call_notification(request: Request):
 
     return Response(status_code=200)
 
-# NUEVO: Endpoint para descargar grabaciones separadas
 @app.get("/recordings/{call_id}/{source}.wav", response_class=FileResponse)
 async def get_recording(call_id: str, source: str):
     if source not in ["whatsapp", "browser"]:
@@ -191,7 +189,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 logging.info(f"[{call_id}] Agente ha contestado. Iniciando negociación de puente.")
                 
-                # MODIFICADO: Preparar dos grabadoras
                 wa_recorder_file = str(RECORDINGS_DIR / f"{call_id}_whatsapp.wav")
                 br_recorder_file = str(RECORDINGS_DIR / f"{call_id}_browser.wav")
 
@@ -220,7 +217,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 browser_pc = RTCPeerConnection(configuration=config)
-                relay = MediaRelay()
                 
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
@@ -233,12 +229,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     logging.info(f"[{call_id}] PISTA DEL NAVEGADOR RECIBIDA: kind={track.kind}")
                     if track.kind == "audio":
                         session["browser_track"] = track
-                        # MODIFICADO: Iniciar grabación del navegador
-                        recorder = session["browser_recorder"]
-                        recorder.addTrack(track)
-                        await recorder.start()
-                        logging.info(f"[{call_id}] Grabación del navegador iniciada.")
-
                         if session["whatsapp_track"]:
                             session["bridge_ready"].set()
 
@@ -247,12 +237,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     logging.info(f"[{call_id}] PISTA DE WHATSAPP RECIBIDA: kind={track.kind}")
                     if track.kind == "audio":
                         session["whatsapp_track"] = track
-                        # MODIFICADO: Iniciar grabación de WhatsApp
-                        recorder = session["whatsapp_recorder"]
-                        recorder.addTrack(track)
-                        await recorder.start()
-                        logging.info(f"[{call_id}] Grabación de WhatsApp iniciada.")
-
                         if session["browser_track"]:
                             session["bridge_ready"].set()
 
@@ -345,21 +329,41 @@ async def websocket_endpoint(websocket: WebSocket):
                         try:
                             await asyncio.wait_for(session["bridge_ready"].wait(), timeout=10.0)
                             
-                            logging.info(f"[{call_id}] Ambos tracks disponibles. Construyendo puente de media.")
+                            logging.info(f"[{call_id}] Ambos tracks disponibles. Construyendo puente de media y grabación.")
                             
                             relay = MediaRelay()
                             
-                            @session["browser_track"].on("frame")
+                            # MODIFICADO: Usar relay para dividir el flujo para el puente y la grabadora
+                            
+                            # Flujo: Navegador -> WhatsApp y Grabadora
+                            browser_track = session["browser_track"]
+                            whatsapp_pc.addTrack(relay.subscribe(browser_track))
+                            
+                            browser_recorder = session["browser_recorder"]
+                            track_for_browser_recorder = relay.subscribe(browser_track)
+                            browser_recorder.addTrack(track_for_browser_recorder)
+                            await browser_recorder.start()
+                            
+                            @track_for_browser_recorder.on("frame")
                             async def on_browser_frame_rx(frame):
                                 session["media_stats"]["browser_packets_received"] += 1
-                            
-                            @session["whatsapp_track"].on("frame")
+
+                            # Flujo: WhatsApp -> Navegador y Grabadora
+                            whatsapp_track = session["whatsapp_track"]
+                            browser_pc.addTrack(relay.subscribe(whatsapp_track))
+
+                            whatsapp_recorder = session["whatsapp_recorder"]
+                            track_for_whatsapp_recorder = relay.subscribe(whatsapp_track)
+                            whatsapp_recorder.addTrack(track_for_whatsapp_recorder)
+                            await whatsapp_recorder.start()
+
+                            @track_for_whatsapp_recorder.on("frame")
                             async def on_whatsapp_frame_rx(frame):
                                 session["media_stats"]["whatsapp_packets_received"] += 1
 
-                            browser_pc.addTrack(relay.subscribe(session["whatsapp_track"]))
-                            whatsapp_pc.addTrack(relay.subscribe(session["browser_track"]))
-                            
+                            logging.info(f"[{call_id}] Puente y grabación iniciados.")
+
+                            # Iniciar monitoreo de media
                             start_time = time.time()
                             while call_id in active_calls:
                                 await asyncio.sleep(5)
