@@ -285,87 +285,80 @@
         }
 
         answerBtn.onclick = async () => {
-            log('Iniciando captura de micrófono...', 'info');
-            answerBtn.disabled = true;
+    log('Contestando llamada...', 'info');
+    answerBtn.disabled = true;
 
-            try {
-                if (!localStream) {
-                    localStream = await navigator.mediaDevices.getUserMedia({ 
-                        audio: true, 
-                        video: false 
-                    });
-                    log('✅ Micrófono capturado', 'success');
-                } else {
-                    log('Micrófono ya estaba disponible', 'info');
-                }
+    try {
+        ws.send(JSON.stringify({ 
+            type: 'answer_call', 
+            call_id: currentCallId 
+        }));
 
-                log('Enviando respuesta al servidor...', 'info');
-                ws.send(JSON.stringify({ 
-                    type: 'answer_call', 
-                    call_id: currentCallId 
-                }));
+    } catch (error) {
+        log(`Error: ${error.message}`, 'error');
+        answerBtn.disabled = false;
+        resetCallState();
+    }
+};
 
-            } catch (error) {
-                log(`❌ Error micrófono: ${error.message}`, 'error');
-                alert('No se pudo acceder al micrófono. Verifica los permisos.');
-                answerBtn.disabled = false;
-                resetCallState();
+        async function handleOfferFromServer(sdp) {
+    try {
+        log('Creando RTCPeerConnection...', 'info');
+        pc = new RTCPeerConnection();
+
+        // PRIMERO: Capturar micrófono y agregar tracks
+        if (!localStream) {
+            log('Solicitando acceso al micrófono...', 'info');
+            localStream = await navigator.mediaDevices.getUserMedia({ 
+                audio: true, 
+                video: false 
+            });
+            log('Micrófono capturado', 'success');
+        }
+
+        log('Agregando micrófono al peer connection...', 'info');
+        localStream.getTracks().forEach((track) => {
+            pc.addTrack(track, localStream);
+        });
+
+        // SEGUNDO: Procesar oferta remota
+        pc.ontrack = (event) => {
+            log('Audio de WhatsApp recibido', 'success');
+            if (audioPlayer.srcObject !== event.streams[0]) {
+                audioPlayer.srcObject = event.streams[0];
             }
         };
 
-        async function handleOfferFromServer(sdp) {
-            try {
-                log('Creando RTCPeerConnection...', 'info');
-                pc = new RTCPeerConnection();
-
-                pc.ontrack = (event) => {
-                    log('🎵 Audio remoto recibido', 'success');
-                    if (audioPlayer.srcObject !== event.streams[0]) {
-                        audioPlayer.srcObject = event.streams[0];
-                    }
-                };
-
-                pc.onconnectionstatechange = () => {
-                    log(`Estado conexión: ${pc.connectionState}`, 'info');
-                    if (pc.connectionState === 'failed') {
-                        log('❌ Conexión falló', 'error');
-                    }
-                };
-
-                if (!localStream) {
-                    log('❌ ERROR: No hay stream local', 'error');
-                    throw new Error('localStream no disponible');
-                }
-
-                log('Agregando tracks locales...', 'info');
-                localStream.getTracks().forEach((track) => {
-                    log(`Agregando track: ${track.kind}`, 'info');
-                    pc.addTrack(track, localStream);
-                });
-
-                log('Procesando oferta remota...', 'info');
-                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: sdp }));
-
-                log('Creando answer...', 'info');
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-
-                log('Enviando answer al servidor...', 'info');
-                ws.send(JSON.stringify({
-                    type: 'answer_from_browser',
-                    call_id: currentCallId,
-                    sdp: pc.localDescription.sdp
-                }));
-
-                showPanel(onCallPanel);
-                log('✅ En llamada', 'success');
-
-            } catch (error) {
-                log(`❌ Error en negociación: ${error.message}`, 'error');
-                console.error(error);
-                resetCallState();
+        pc.onconnectionstatechange = () => {
+            log(`Estado conexión: ${pc.connectionState}`, 'info');
+            if (pc.connectionState === 'failed') {
+                log('Conexión fallida', 'error');
             }
-        }
+        };
+
+        log('Procesando oferta del servidor...', 'info');
+        await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: sdp }));
+
+        log('Creando answer...', 'info');
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        log('Enviando answer al servidor...', 'info');
+        ws.send(JSON.stringify({
+            type: 'answer_from_browser',
+            call_id: currentCallId,
+            sdp: pc.localDescription.sdp
+        }));
+
+        showPanel(onCallPanel);
+        log('Llamada conectada - bidireccional activa', 'success');
+
+    } catch (error) {
+        log(`Error: ${error.message}`, 'error');
+        console.error(error);
+        resetCallState();
+    }
+}
 
         hangupBtn.onclick = () => {
             log('Terminando llamada...', 'info');

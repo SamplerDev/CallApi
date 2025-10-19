@@ -189,8 +189,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 # CORRECCIÓN 1: Transceptores con direcciones correctas
                 # CORRECTO:
-                browser_trx = browser_pc.addTransceiver("audio", direction="sendonly")    # Enviamos AL navegador
-                whatsapp_trx = whatsapp_pc.addTransceiver("audio", direction="recvonly")  # RECIBIMOS DE WhatsApp
+                browser_trx = browser_pc.addTransceiver("audio", direction="sendrecv")
+                 # bidireccional
+                whatsapp_trx = whatsapp_pc.addTransceiver("audio", direction="recvonly") 
 
                 # CORRECCIÓN 2: Guardar transceptores en session para acceso posterior
                 session["browser_trx"] = browser_trx
