@@ -242,17 +242,27 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 session_id_val = int(time.time() * 1000)
                 final_sdp = (
-                    f"v=0\r\no=- {session_id_val} 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE audio\r\n"
+                    f"v=0\r\n"
+                    f"o=- {session_id_val} 2 IN IP4 127.0.0.1\r\n"
+                    f"s=-\r\n"
+                    f"t=0 0\r\n"
+                    f"a=group:BUNDLE audio\r\n"
                     f"a=msid-semantic: WMS {msid}\r\n"
-                    "m=audio 9 UDP/TLS/RTP/SAVPF 111 126\r\nc=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\n"
-                    f"a=ice-ufrag:{ice_ufrag}\r\na=ice-pwd:{ice_pwd}\r\na=fingerprint:{fingerprint}\r\n"
-                    "a=setup:active\r\na=mid:audio\r\n"
-                    "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
-                    "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext:abs-send-time\r\n"
-                    "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
-                    "a=sendrecv\r\na=rtcp-mux\r\n"
-                    "a=rtpmap:111 opus/48000/2\r\na=rtcp-fb:111 transport-cc\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n"
-                    "a=rtpmap:126 telephone-event/8000\r\n"
+                    # La línea 'm=' ahora solo incluye los códecs que aiortc realmente negoció.
+                    # En tu log, solo era '111'. Si en el futuro negocias más, deberás añadirlos aquí.
+                    f"m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" 
+                    f"c=IN IP4 0.0.0.0\r\n"
+                    f"a=rtcp:9 IN IP4 0.0.0.0\r\n"
+                    f"a=ice-ufrag:{ice_ufrag}\r\n"
+                    f"a=ice-pwd:{ice_pwd}\r\n"
+                    f"a=fingerprint:{fingerprint}\r\n"
+                    f"a=setup:active\r\n"
+                    f"a=mid:audio\r\n"
+                    f"a=sendrecv\r\n"
+                    f"a=rtcp-mux\r\n"
+                    # Mantenemos solo la descripción del códec 111 (opus)
+                    f"a=rtpmap:111 opus/48000/2\r\n"
+                    f"a=fmtp:111 minptime=10;useinbandfec=1\r\n"
                     f"a=ssrc:{ssrc} cname:{cname}\r\n"
                     f"a=ssrc:{ssrc} msid:{msid} {track_id}\r\n"
                 )
