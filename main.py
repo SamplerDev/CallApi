@@ -262,10 +262,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 ssrc = ssrc_parts[0].split(':')[1]
                 cname = ssrc_parts[1].split('cname:')[1]
 
-                msid_line = next(line for line in source_lines if line.startswith("a=ssrc:") and "msid:" in line and ssrc in line)
+                # Extraer MSID y Track ID de la línea a=msid (no de la línea ssrc)
+                msid_line = next(line for line in source_lines if line.startswith("a=msid:"))
                 msid_parts = msid_line.split()
-                msid = msid_parts[1].split(':')[1]
-                track_id = msid_parts[2]
+                msid = msid_parts[0].split(':')[1]
+                track_id = msid_parts[1]
 
                 m_line = next(line for line in source_lines if line.startswith("m=audio"))
                 payload_types = m_line.split()[3:]
