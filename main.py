@@ -207,10 +207,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             logging.info(f"[{call_id}] Track del navegador suscrito al relay")
                             
                             whatsapp_trx = session["whatsapp_trx"]
-                            sender = whatsapp_trx.sender
-                            await sender.replaceTrack(relay_track)
+                            # NO USAR replaceTrack en un transceptor vacío
+                            # Usar addTrack directamente
+                            sender = whatsapp_pc.addTrack(relay_track)
                             session["whatsapp_sender"] = sender
-                            logging.info(f"[{call_id}] Audio del navegador será enviado a WhatsApp")
+                            logging.info(f"[{call_id}] Audio del navegador agregado a WhatsApp (sender: {sender})")
                             
                             frame_count = [0]
                             @track.on("frame")
@@ -233,11 +234,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             relay_track = relay.subscribe(track)
                             logging.info(f"[{call_id}] Track de WhatsApp suscrito al relay")
                             
-                            browser_trx = session["browser_trx"]
-                            sender = browser_trx.sender
-                            await sender.replaceTrack(relay_track)
+                            # NO USAR replaceTrack en un transceptor vacío
+                            # Usar addTrack directamente
+                            sender = browser_pc.addTrack(relay_track)
                             session["browser_sender"] = sender
-                            logging.info(f"[{call_id}] Audio de WhatsApp será enviado al navegador")
+                            logging.info(f"[{call_id}] Audio de WhatsApp agregado al navegador (sender: {sender})")
                             
                             frame_count = [0]
                             @track.on("frame")
