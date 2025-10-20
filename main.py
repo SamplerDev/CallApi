@@ -204,15 +204,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
 
                 config = RTCConfiguration(iceServers=[
-                    RTCIceServer(urls="stun:stun.l.google.com:19302"),
-                    RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
-                    RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
-                ])
-                
-                # Las líneas setPortRange han sido eliminadas porque no son válidas
-                # y no son necesarias si la regla del firewall es correcta.
+                RTCIceServer(urls="stun:stun.l.google.com:19302"),
+                RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
+                RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
+            ])
+            
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 browser_pc = RTCPeerConnection(configuration=config)
+
+            # --- AÑADIR ESTA LÍNEA ---
+            # Forzamos a la conexión del navegador a usar únicamente el servidor TURN,
+            # ya que la conexión directa está fallando.
+                browser_pc.iceTransportPolicy = "relay"
+
                 
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
