@@ -29,6 +29,9 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 TURN_USERNAME = os.getenv("TURN_USERNAME")
 TURN_CREDENTIAL = os.getenv("TURN_CREDENTIAL")
+TWILIO_USERNAME = os.getenv("TWILIO_USERNAME")
+TWILIO_CREDENTIAL = os.getenv("TWILIO_CREDENTIAL")
+
 
 if not all([VERIFY_TOKEN, PHONE_NUMBER_ID, ACCESS_TOKEN, TURN_USERNAME, TURN_CREDENTIAL]):
     raise ValueError("Faltan una o más variables de entorno críticas.")
@@ -204,19 +207,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
 
                 config = RTCConfiguration(iceServers=[
-                RTCIceServer(urls="stun:stun.l.google.com:19302"),
-                RTCIceServer(urls="turn:global.relay.metered.ca:80", username=TURN_USERNAME, credential=TURN_CREDENTIAL),
-                RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
-            ])
-            
+                    RTCIceServer(
+                        urls=[
+                            "stun:global.stun.twilio.com:3478",
+                            "turn:global.turn.twilio.com:3478?transport=udp",
+                            "turn:global.turn.twilio.com:3478?transport=tcp",
+                            "turns:global.turn.twilio.com:443?transport=tcp"
+                        ],
+                        username=TWILIO_USERNAME,
+                        credential=TWILIO_CREDENTIAL
+                    )
+                ])
+                
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 browser_pc = RTCPeerConnection(configuration=config)
-
-            # --- AÑADIR ESTA LÍNEA ---
-            # Forzamos a la conexión del navegador a usar únicamente el servidor TURN,
-            # ya que la conexión directa está fallando.
-                browser_pc.iceTransportPolicy = "relay"
-
+                
+                # Ya no forzamos el relay, dejamos que WebRTC elija la mejor ruta.
                 
                 session["whatsapp_pc"] = whatsapp_pc
                 session["browser_pc"] = browser_pc
