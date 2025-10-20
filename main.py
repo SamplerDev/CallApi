@@ -131,13 +131,13 @@ async def receive_call_notification(request: Request):
                 if session.get("monitor_task"):
                     session["monitor_task"].cancel()
                 
-                # CORRECCIÓN: Usar .file en lugar de ._file
+                # CORRECCIÓN: Usar ._file en lugar de .file
                 if session.get("whatsapp_recorder"):
                     await session["whatsapp_recorder"].stop()
-                    logging.info(f"Grabación de WhatsApp guardada en {session['whatsapp_recorder'].file}")
+                    logging.info(f"Grabación de WhatsApp guardada en {session['whatsapp_recorder']._file}")
                 if session.get("browser_recorder"):
                     await session["browser_recorder"].stop()
-                    logging.info(f"Grabación del navegador guardada en {session['browser_recorder'].file}")
+                    logging.info(f"Grabación del navegador guardada en {session['browser_recorder']._file}")
 
                 if session.get("whatsapp_pc"):
                     await session["whatsapp_pc"].close()
