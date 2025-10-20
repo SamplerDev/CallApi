@@ -1,4 +1,4 @@
-# --- START OF ENHANCED LOGGING FILE main.py ---
+# --- START OF CORRECTED FILE main.py ---
 
 import os
 import json
@@ -18,11 +18,10 @@ from aiortc.contrib.media import MediaRelay
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
 
-# CAMBIO: Nivel de logging a DEBUG para máxima verbosidad
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logging.getLogger("aiortc.rtcrtpreceiver").setLevel(logging.WARNING)
 logging.getLogger("aiortc.rtcrtpsender").setLevel(logging.WARNING)
-logging.getLogger("aiortc").setLevel(logging.INFO) # Mantenemos aiortc en INFO para no saturar con detalles internos
+logging.getLogger("aiortc").setLevel(logging.INFO)
 logging.getLogger("httpx").setLevel(logging.INFO)
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
@@ -210,6 +209,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     RTCIceServer(urls="turns:global.relay.metered.ca:443?transport=tcp", username=TURN_USERNAME, credential=TURN_CREDENTIAL)
                 ])
                 
+                # Las líneas setPortRange han sido eliminadas porque no son válidas
+                # y no son necesarias si la regla del firewall es correcta.
                 whatsapp_pc = RTCPeerConnection(configuration=config)
                 browser_pc = RTCPeerConnection(configuration=config)
                 
@@ -227,7 +228,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         @track.on("frame")
                         async def on_browser_frame_rx(frame):
                             session["media_stats"]["browser_packets_received"] += 1
-                            if session["media_stats"]["browser_packets_received"] % 100 == 1: # Log every 100 packets
+                            if session["media_stats"]["browser_packets_received"] % 100 == 1:
                                 logging.debug(f"[{call_id}] Received packet from Browser. Total: {session['media_stats']['browser_packets_received']}")
 
                 @whatsapp_pc.on("track")
@@ -238,7 +239,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         @track.on("frame")
                         async def on_whatsapp_frame_rx(frame):
                             session["media_stats"]["whatsapp_packets_received"] += 1
-                            if session["media_stats"]["whatsapp_packets_received"] % 100 == 1: # Log every 100 packets
+                            if session["media_stats"]["whatsapp_packets_received"] % 100 == 1:
                                 logging.debug(f"[{call_id}] Received packet from WhatsApp. Total: {session['media_stats']['whatsapp_packets_received']}")
 
                 @whatsapp_pc.on("connectionstatechange")
@@ -268,6 +269,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 logging.info(f"[{call_id}] Sent SDP offer to browser via WebSocket.")
 
             elif event_type == "answer_from_browser":
+                # ... (el resto del código es idéntico y correcto)
                 logging.info(f"[{call_id}] Received SDP answer from browser.")
                 
                 whatsapp_pc = session["whatsapp_pc"]
@@ -286,7 +288,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 await whatsapp_pc.setLocalDescription(whatsapp_answer)
                 logging.info(f"[{call_id}] Internal aiortc answer for WhatsApp generated and set.")
 
-                # SDP Reconstruction Logic
                 source_sdp = whatsapp_pc.localDescription.sdp
                 source_lines = source_sdp.splitlines()
                 logging.debug(f"[{call_id}] Reconstructing SDP from aiortc answer:\n{source_sdp}")
@@ -408,4 +409,4 @@ if __name__ == "__main__":
     port = int(os.environ.get('PORT', 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
 
-# --- END OF ENHANCED LOGGING FILE main.py ---
+# --- END OF CORRECTED FILE main.py ---
