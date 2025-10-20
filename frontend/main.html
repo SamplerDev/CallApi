@@ -227,7 +227,7 @@
             // Conectamos directamente a la IP del servidor a través del subdominio,
             // evitando el proxy de Cloudflare. Usamos 'ws://' porque el SSL de Cloudflare
             // no cubre esta conexión directa.
-            const wsUrl = `ws://webrtc.viajecito.com.ar/ws`;
+            const wsUrl = `wss://webrtc.viajecito.com.ar/ws`;
             
             log(`Conectando a: ${wsUrl}`, 'info');
             setStatus('Conectando...', false);
