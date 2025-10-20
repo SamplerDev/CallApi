@@ -223,8 +223,11 @@
         }
 
         function connect() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            // --- SOLUCIÓN #1: USAR EL SUBDOMINIO "SOLO DNS" ---
+            // Conectamos directamente a la IP del servidor a través del subdominio,
+            // evitando el proxy de Cloudflare. Usamos 'ws://' porque el SSL de Cloudflare
+            // no cubre esta conexión directa.
+            const wsUrl = `ws://webrtc.viajecito.com.ar/ws`;
             
             log(`Conectando a: ${wsUrl}`, 'info');
             setStatus('Conectando...', false);
@@ -239,7 +242,7 @@
 
             ws.onmessage = async (event) => {
                 const data = JSON.parse(event.data);
-                log(`📩 ${data.type}`, 'info');
+                log(`📩 Recibido: ${data.type}`, 'info');
 
                 switch (data.type) {
                     case 'incoming_call':
@@ -247,12 +250,11 @@
                         break;
                     
                     case 'offer_from_server':
-                        log('Recibida oferta del servidor', 'info');
                         await handleOfferFromServer(data.sdp);
                         break;
 
                     case 'call_terminated':
-                        log('Llamada terminada por servidor', 'error');
+                        log('Llamada terminada por el servidor', 'error');
                         resetCallState();
                         break;
                 }
@@ -266,13 +268,13 @@
             };
 
             ws.onerror = (error) => {
-                log(`❌ Error WebSocket: ${error}`, 'error');
+                log(`❌ Error de WebSocket: ${JSON.stringify(error)}`, 'error');
             };
         }
 
         function handleIncomingCall(data) {
             if (currentCallId) {
-                log('Ignorando: ya hay una llamada activa', 'info');
+                log('Ignorando llamada entrante: ya hay una en curso.', 'info');
                 return;
             }
             
@@ -284,84 +286,94 @@
             log(`📞 Llamada entrante de ${data.from}`, 'success');
         }
 
+        // --- SOLUCIÓN #2: LÓGICA DE NEGOCIACIÓN MEJORADA ---
         answerBtn.onclick = async () => {
-    log('Contestando llamada...', 'info');
-    answerBtn.disabled = true;
+            log('Botón "Contestar" presionado.', 'info');
+            answerBtn.disabled = true;
+            answerBtn.textContent = 'Conectando...';
 
-    try {
-        ws.send(JSON.stringify({ 
-            type: 'answer_call', 
-            call_id: currentCallId 
-        }));
+            try {
+                // 1. Crear PeerConnection
+                log('Creando RTCPeerConnection...', 'info');
+                pc = new RTCPeerConnection();
 
-    } catch (error) {
-        log(`Error: ${error.message}`, 'error');
-        answerBtn.disabled = false;
-        resetCallState();
-    }
-};
+                // 2. Configurar manejadores de eventos ANTES de negociar
+                pc.ontrack = (event) => {
+                    log('✅ Pista de audio remota recibida (de WhatsApp)', 'success');
+                    if (audioPlayer.srcObject !== event.streams[0]) {
+                        audioPlayer.srcObject = event.streams[0];
+                    }
+                };
+
+                pc.onconnectionstatechange = () => {
+                    log(`Estado de conexión WebRTC: ${pc.connectionState}`, 'info');
+                    if (pc.connectionState === 'failed') {
+                        log('❌ La conexión WebRTC ha fallado.', 'error');
+                        resetCallState();
+                    }
+                    if (pc.connectionState === 'connected') {
+                        log('✅ Conexión WebRTC establecida.', 'success');
+                    }
+                };
+
+                // 3. Obtener micrófono y añadirlo a la conexión
+                log('Solicitando acceso al micrófono...', 'info');
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                log('🎤 Micrófono capturado.', 'success');
+                
+                localStream.getTracks().forEach((track) => {
+                    pc.addTrack(track, localStream);
+                    log('Pista de micrófono local añadida a la conexión.', 'info');
+                });
+
+                // 4. Ahora que estamos listos, avisar al servidor
+                log('Enviando "answer_call" al servidor...', 'info');
+                ws.send(JSON.stringify({ 
+                    type: 'answer_call', 
+                    call_id: currentCallId 
+                }));
+
+            } catch (error) {
+                log(`❌ Error al preparar la llamada: ${error.message}`, 'error');
+                console.error(error);
+                answerBtn.disabled = false;
+                answerBtn.textContent = 'Contestar Llamada';
+                resetCallState();
+            }
+        };
 
         async function handleOfferFromServer(sdp) {
-    try {
-        log('Creando RTCPeerConnection...', 'info');
-        pc = new RTCPeerConnection();
+            if (!pc) {
+                log('❌ Recibida oferta pero no hay PeerConnection. Ignorando.', 'error');
+                return;
+            }
+            try {
+                log('Procesando oferta del servidor...', 'info');
+                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: sdp }));
 
-        // PRIMERO: Capturar micrófono y agregar tracks
-        if (!localStream) {
-            log('Solicitando acceso al micrófono...', 'info');
-            localStream = await navigator.mediaDevices.getUserMedia({ 
-                audio: true, 
-                video: false 
-            });
-            log('Micrófono capturado', 'success');
+                log('Creando respuesta (answer)...', 'info');
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+
+                log('Enviando respuesta (answer) al servidor...', 'info');
+                ws.send(JSON.stringify({
+                    type: 'answer_from_browser',
+                    call_id: currentCallId,
+                    sdp: pc.localDescription.sdp
+                }));
+
+                showPanel(onCallPanel);
+                log('📞 Llamada activa.', 'success');
+
+            } catch (error) {
+                log(`❌ Error durante la negociación SDP: ${error.message}`, 'error');
+                console.error(error);
+                resetCallState();
+            }
         }
 
-        log('Agregando micrófono al peer connection...', 'info');
-        localStream.getTracks().forEach((track) => {
-            pc.addTrack(track, localStream);
-        });
-
-        // SEGUNDO: Procesar oferta remota
-        pc.ontrack = (event) => {
-            log('Audio de WhatsApp recibido', 'success');
-            if (audioPlayer.srcObject !== event.streams[0]) {
-                audioPlayer.srcObject = event.streams[0];
-            }
-        };
-
-        pc.onconnectionstatechange = () => {
-            log(`Estado conexión: ${pc.connectionState}`, 'info');
-            if (pc.connectionState === 'failed') {
-                log('Conexión fallida', 'error');
-            }
-        };
-
-        log('Procesando oferta del servidor...', 'info');
-        await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: sdp }));
-
-        log('Creando answer...', 'info');
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-
-        log('Enviando answer al servidor...', 'info');
-        ws.send(JSON.stringify({
-            type: 'answer_from_browser',
-            call_id: currentCallId,
-            sdp: pc.localDescription.sdp
-        }));
-
-        showPanel(onCallPanel);
-        log('Llamada conectada - bidireccional activa', 'success');
-
-    } catch (error) {
-        log(`Error: ${error.message}`, 'error');
-        console.error(error);
-        resetCallState();
-    }
-}
-
         hangupBtn.onclick = () => {
-            log('Terminando llamada...', 'info');
+            log('Colgando la llamada...', 'info');
             ws.send(JSON.stringify({ 
                 type: 'hangup_from_browser', 
                 call_id: currentCallId 
@@ -370,7 +382,7 @@
         };
 
         function resetCallState() {
-            log('Limpiando estado de llamada...', 'info');
+            log('Limpiando estado de la llamada...', 'info');
             
             if (pc) {
                 pc.close();
@@ -385,9 +397,12 @@
             audioPlayer.srcObject = null;
             currentCallId = null;
             answerBtn.disabled = false;
+            answerBtn.textContent = 'Contestar Llamada';
             
             showPanel(null);
-            setStatus('Conectado al Lobby', true);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                setStatus('Conectado al Lobby', true);
+            }
         }
 
         log('Inicializando agente...', 'info');
